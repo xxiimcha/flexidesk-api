@@ -19,6 +19,7 @@ app.get("/api/health", (_req, res) => res.json({ status: "up" }));
 // routes
 app.use("/api/auth", require("./src/routes/auth.routes"));
 app.use("/api/users", require("./src/routes/users.routes"));
+app.use("/api/listings", require("./src/routes/listings.routes"));
 
 // owner routes
 app.use("/api/owner", require("./src/owners")); 
