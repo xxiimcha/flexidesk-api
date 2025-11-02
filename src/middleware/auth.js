@@ -1,25 +1,55 @@
+// src/middleware/auth.js
 const jwt = require("jsonwebtoken");
-const mongoose = require("mongoose");
+const { isValidObjectId, Types } = require("mongoose");
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
+const { JWT_SECRET = "dev_secret_change_me" } = process.env;
 
-module.exports = function requireAuth(req, res, next) {
+function readToken(req) {
+  // 1) Authorization header
+  const hdr = req.headers.authorization || "";
+  if (hdr.startsWith("Bearer ")) return hdr.slice(7);
+
+  // 2) Cookies (requires cookie-parser in server.js)
+  if (req.cookies?.adm_sess) return req.cookies.adm_sess; // admin cookie
+  if (req.cookies?.sess) return req.cookies.sess;         // generic cookie (optional)
+
+  return null;
+}
+
+function requireAuth(req, res, next) {
   try {
-    const hdr = req.headers.authorization || "";
-    const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : null;
-    if (!token) return res.status(401).json({ message: "Missing auth token" });
+    const token = readToken(req);
+    if (!token) return res.status(401).json({ error: "Unauthorized: missing token" });
 
     const decoded = jwt.verify(token, JWT_SECRET);
-    const rawId = decoded.id || decoded.userId;
-    if (!rawId) return res.status(401).json({ message: "Invalid token payload" });
+    const rawId = decoded.uid || decoded.id || decoded.userId;
+    if (!rawId) return res.status(401).json({ error: "Unauthorized: bad token payload" });
 
-    let userId = rawId;
-    if (mongoose.isValidObjectId(rawId)) userId = new mongoose.Types.ObjectId(rawId);
+    // normalize user id representation
+    const uid = isValidObjectId(rawId) ? new Types.ObjectId(rawId) : rawId;
 
-    req.user = { id: userId, email: decoded.email || null, role: decoded.role || null };
+    req.user = {
+      uid,                                 // normalized id
+      email: decoded.email || null,
+      role: decoded.role || null,
+    };
     next();
   } catch (err) {
     console.error("Auth error:", err.message);
-    return res.status(401).json({ message: "Invalid or expired token" });
+    return res.status(401).json({ error: "Invalid or expired token" });
   }
-};
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== "admin") {
+    return res.status(403).json({ error: "Admin only" });
+  }
+  next();
+}
+
+// ✅ support both styles:
+//  - const { requireAuth, requireAdmin } = require("./middleware/auth");
+//  - const requireAuth = require("./middleware/auth");
+module.exports = requireAuth;
+module.exports.requireAuth = requireAuth;
+module.exports.requireAdmin = requireAdmin;
