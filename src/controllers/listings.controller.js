@@ -1,10 +1,6 @@
 // Public listings controller
 const Listing = require("../models/Listing");
 
-/**
- * GET /api/listings?status=active&limit=24&cursor=<_id>
- * Public list of listings by status (default: active).
- */
 exports.listPublic = async (req, res) => {
   try {
     const {
@@ -34,5 +30,21 @@ exports.listPublic = async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ message: e.message || "Failed to load listings" });
+  }
+};
+
+exports.getPublicById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const doc = await Listing
+      .findOne({ _id: id, status: "active" })
+      .lean();
+
+    if (!doc) return res.status(404).json({ message: "Not found" });
+
+    // normalize
+    res.json({ listing: { id: String(doc._id), ...doc } });
+  } catch (e) {
+    res.status(500).json({ message: e.message || "Failed to load listing" });
   }
 };
