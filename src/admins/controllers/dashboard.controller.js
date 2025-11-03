@@ -6,15 +6,11 @@ const User = require("../../models/User");
 const Listing = require("../../models/Listing");
 const Booking = require("../../models/Booking");
 
-// GET /api/admin/dashboard
-// Returns: { userCount, listingCount, bookings30d, revenue30d, recent }
 exports.getDashboard = async (req, res, next) => {
   try {
-    // If you have admin auth, you can assert req.user.role === 'admin' here.
 
     const since = dayjs().subtract(30, "day").toDate();
 
-    // Run independent queries in parallel so one failure doesn't block the rest
     const [
       userCountP,
       listingCountP,

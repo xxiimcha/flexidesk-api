@@ -3,27 +3,29 @@ const router = express.Router();
 
 const { requireAuth, requireAdmin } = require("../../middleware/auth");
 const auth = require("../controllers/auth.controller");
-const dashboard = require("../controllers/dashboard.controller"); 
+const dashboard = require("../controllers/dashboard.controller");
 
+// sanity checks...
 if (typeof requireAuth !== "function") throw new Error("requireAuth is not a function");
 if (typeof requireAdmin !== "function") throw new Error("requireAdmin is not a function");
 if (typeof auth?.login !== "function") throw new Error("auth.login is not a function");
 if (typeof auth?.me !== "function") throw new Error("auth.me is not a function");
 if (typeof auth?.logout !== "function") throw new Error("auth.logout is not a function");
-if (typeof dashboard?.getDashboard !== "function")
-  throw new Error("dashboard.getDashboard is not a function");
+if (typeof dashboard?.getDashboard !== "function") throw new Error("dashboard.getDashboard is not a function");
 
-// --- Public routes (no auth)
+// public
 router.post("/login", auth.login);
 
-// --- Authenticated admin routes
+// admin-only
 router.get("/me", requireAuth, requireAdmin, auth.me);
 router.post("/logout", requireAuth, requireAdmin, auth.logout);
 
-// --- Admin Dashboard (MongoDB data)
-router.get("/dashboard", requireAuth, requireAdmin, dashboard.getDashboard); // ✅ new
+// dashboard stats
+router.get("/dashboard", requireAuth, requireAdmin, dashboard.getDashboard);
 
-// --- (Optional) keep a test route for debugging
-router.get("/_ping", (req, res) => res.json({ status: "ok", env: process.env.NODE_ENV }));
+// listings (MongoDB)
+router.use("/listings", require("./listings.routes"));
+
+router.get("/_ping", (_req, res) => res.json({ status: "ok" }));
 
 module.exports = router;
