@@ -1,101 +1,67 @@
 const mongoose = require("mongoose");
 
-// ===== Helpers =====
-function isISODate(s) {
-  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
-}
-function isTimeHHMM(s) {
-  return !s || /^\d{2}:\d{2}$/.test(String(s));
-}
-function toMinutes(t) {
-  if (!isTimeHHMM(t)) return null;
-  const [h, m] = String(t).split(":").map(Number);
-  return h * 60 + m;
-}
-function diffHours(dateA, timeA, dateB, timeB) {
-  try {
-    const start = new Date(`${dateA}T${timeA || "00:00"}:00Z`);
-    const end = new Date(`${dateB}T${timeB || "00:00"}:00Z`);
-    const ms = end - start;
-    if (ms <= 0) return 0;
-    const hours = ms / 36e5;
-    return Math.ceil(hours * 4) / 4;
-  } catch { return 0; }
-}
-// Normalize user id from req.user (supports {id}|{uid}|{_id})
-function getUserId(user) {
-  return String(user?.id || user?.uid || user?._id || "");
-}
+function isISODate(s) { return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s); }
+function isTimeHHMM(s) { return !s || /^\d{2}:\d{2}$/.test(String(s)); }
+function toMinutes(t) { if (!isTimeHHMM(t)) return null; const [h, m] = String(t).split(":").map(Number); return h * 60 + m; }
+function diffHours(dateA, timeA, dateB, timeB) { try { const start = new Date(`${dateA}T${timeA || "00:00"}:00Z`); const end = new Date(`${dateB}T${timeB || "00:00"}:00Z`); const ms = end - start; if (ms <= 0) return 0; const hours = ms / 36e5; return Math.ceil(hours * 4) / 4; } catch { return 0; } }
+function getUserId(user) { return String(user?.id || user?.uid || user?._id || ""); }
 
-// ===== Models =====
 const Inquiry = mongoose.models.Inquiry || require("../models/Inquiry");
 const Listing = mongoose.models.Listing || require("../models/Listing");
 const User = mongoose.models.User || require("../models/User");
 
-// ===== Access control helpers =====
-function isAdmin(user) {
-  return user?.role === "admin" || user?.role === "superadmin";
-}
-function canReadInquiry(inquiry, user) {
-  const uid = getUserId(user);
-  if (!uid) return false;
-  if (isAdmin(user)) return true;
-  return (
-    String(inquiry.guestId) === uid ||
-    String(inquiry.hostId) === uid
-  );
-}
-function canReplyInquiry(inquiry, user) {
-  return canReadInquiry(inquiry, user);
+function isAdmin(user) { return user?.role === "admin" || user?.role === "superadmin"; }
+function canReadInquiry(inquiry, user) { const uid = getUserId(user); if (!uid) return false; if (isAdmin(user)) return true; return String(inquiry.guestId) === uid || String(inquiry.hostId) === uid; }
+function canReplyInquiry(inquiry, user) { return canReadInquiry(inquiry, user); }
+
+function mapThreadSummary(doc, meId) {
+  const lastMsg = (doc.messages || [])[doc.messages.length - 1];
+  const youAreGuest = String(doc.guestId) === String(meId);
+  const unread = youAreGuest ? (doc.unreadCountGuest || 0) : (doc.unreadCountHost || 0);
+  return {
+    id: String(doc._id),
+    space: doc.listingTitle || doc.listingName || "Conversation",
+    host: doc.hostName || "",
+    avatar: doc.hostAvatar || "",
+    last: lastMsg?.body || "",
+    time: doc.lastMessageAt ? new Date(doc.lastMessageAt).toLocaleString() : "",
+    unread,
+    reservation: doc.reservation || null,
+  };
 }
 
-// ====== Controllers ======
+function mapMessages(doc, meId) {
+  return (doc.messages || []).map((m) => ({
+    id: String(m._id || m.createdAt?.getTime() || Math.random()),
+    from: String(m.senderId) === String(meId) ? "me" : "host",
+    text: m.body,
+    time: new Date(m.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+    status: (m.readBy || []).some(x => String(x) === String(meId)) ? "read" : "sent",
+  }));
+}
 
-/**
- * POST /api/inquiries
- * Body: { listingId, message, to?, meta?: { startDate, endDate, checkInTime, checkOutTime, guests, nights, totalHours } }
- */
 exports.createInquiry = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
-
-    const {
-      listingId,
-      message,
-      to,
-      meta = {},
-    } = req.body || {};
-
+    const { listingId, message, to, meta = {} } = req.body || {};
     if (!listingId) return res.status(400).json({ message: "listingId is required" });
     const body = String(message || "").trim();
-    if (!body || body.length < 3) {
-      return res.status(400).json({ message: "Message is too short" });
-    }
-
+    if (!body || body.length < 3) return res.status(400).json({ message: "Message is too short" });
     const listing = await Listing.findById(listingId).lean();
     if (!listing) return res.status(404).json({ message: "Listing not found" });
-
     const hostId = String(to || listing.owner || listing.ownerId || "");
     if (!hostId) return res.status(400).json({ message: "Host not found for this listing" });
-
     const guestId = String(uid);
-    if (guestId === hostId) {
-      return res.status(400).json({ message: "You cannot inquire on your own listing" });
-    }
+    if (guestId === hostId) return res.status(400).json({ message: "You cannot inquire on your own listing" });
 
     const cleanMeta = {};
     if (isISODate(meta.startDate)) cleanMeta.startDate = meta.startDate;
     if (isISODate(meta.endDate)) cleanMeta.endDate = meta.endDate;
     if (isTimeHHMM(meta.checkInTime)) cleanMeta.checkInTime = meta.checkInTime || null;
     if (isTimeHHMM(meta.checkOutTime)) cleanMeta.checkOutTime = meta.checkOutTime || null;
-
-    const pax = Number(meta.guests || 0);
-    if (pax > 0) cleanMeta.guests = pax;
-
-    const nights = Number(meta.nights || 0);
-    if (nights > 0) cleanMeta.nights = nights;
-
+    const pax = Number(meta.guests || 0); if (pax > 0) cleanMeta.guests = pax;
+    const nights = Number(meta.nights || 0); if (nights > 0) cleanMeta.nights = nights;
     let totalHours = Number(meta.totalHours || 0);
     if ((!totalHours || totalHours <= 0) && cleanMeta.startDate && cleanMeta.endDate) {
       totalHours = diffHours(cleanMeta.startDate, cleanMeta.checkInTime, cleanMeta.endDate, cleanMeta.checkOutTime);
@@ -103,7 +69,6 @@ exports.createInquiry = async (req, res, next) => {
     if (totalHours > 0) cleanMeta.totalHours = totalHours;
 
     const key = `${guestId}_${hostId}_${listingId}`;
-
     const now = new Date();
     const doc = await Inquiry.create({
       listingId,
@@ -115,138 +80,91 @@ exports.createInquiry = async (req, res, next) => {
       createdAt: now,
       updatedAt: now,
       meta: cleanMeta,
-      messages: [
-        {
-          senderId: guestId,
-          body,
-          createdAt: now,
-          readBy: [guestId],
-        },
-      ],
+      messages: [{ senderId: guestId, body, createdAt: now, readBy: [guestId] }],
       unreadCountHost: 1,
       unreadCountGuest: 0,
     });
-
     return res.status(201).json({ ok: true, inquiry: doc });
   } catch (err) { next(err); }
 };
 
-/**
- * GET /api/inquiries
- * Query: role=guest|host (default: guest)
- */
 exports.listMyInquiries = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
-
     const role = String(req.query.role || "guest").toLowerCase();
     const filter = role === "host" ? { hostId: uid } : { guestId: uid };
-
-    const list = await Inquiry.find(filter)
-      .sort({ lastMessageAt: -1 })
-      .select("-messages.body")
-      .lean();
-
-    return res.json({ ok: true, inquiries: list });
+    const list = await Inquiry.find(filter).sort({ lastMessageAt: -1 }).select("-messages.body").lean();
+    const threads = list.map(d => mapThreadSummary(d, uid));
+    return res.json({ ok: true, threads });
   } catch (err) { next(err); }
 };
 
-/**
- * GET /api/inquiries/:id
- * Returns full conversation with messages.
- */
 exports.getInquiry = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
-
     const inquiry = await Inquiry.findById(req.params.id);
     if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
-
-    if (!canReadInquiry(inquiry, req.user)) {
-      return res.status(403).json({ message: "Forbidden" });
-    }
-
+    if (!canReadInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
     return res.json({ ok: true, inquiry });
   } catch (err) { next(err); }
 };
 
-/**
- * POST /api/inquiries/:id/reply
- * Body: { message }
- */
+exports.getInquiryMessages = async (req, res, next) => {
+  try {
+    const uid = getUserId(req.user);
+    if (!uid) return res.status(401).json({ message: "Unauthorized" });
+    const inquiry = await Inquiry.findById(req.params.id);
+    if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
+    if (!canReadInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
+    const msgs = mapMessages(inquiry, uid);
+    return res.json({ ok: true, messages: msgs });
+  } catch (err) { next(err); }
+};
+
 exports.replyInquiry = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
-
     const inquiry = await Inquiry.findById(req.params.id);
     if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
     if (!canReplyInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
-
     const body = String(req.body?.message || "").trim();
     if (!body || body.length < 2) return res.status(400).json({ message: "Message is too short" });
-
     const senderId = String(uid);
     const now = new Date();
-
-    inquiry.messages.push({
-      senderId,
-      body,
-      createdAt: now,
-      readBy: [senderId],
-    });
-
+    inquiry.messages.push({ senderId, body, createdAt: now, readBy: [senderId] });
     const isGuest = String(inquiry.guestId) === senderId;
-    if (isGuest) {
-      inquiry.unreadCountHost = (inquiry.unreadCountHost || 0) + 1;
-    } else {
-      inquiry.unreadCountGuest = (inquiry.unreadCountGuest || 0) + 1;
-    }
-
+    if (isGuest) inquiry.unreadCountHost = (inquiry.unreadCountHost || 0) + 1;
+    else inquiry.unreadCountGuest = (inquiry.unreadCountGuest || 0) + 1;
     inquiry.lastMessageAt = now;
     inquiry.updatedAt = now;
-
     await inquiry.save();
-
     return res.json({ ok: true, inquiry });
   } catch (err) { next(err); }
 };
 
-/**
- * PATCH /api/inquiries/:id/read
- * Marks the conversation messages as read for the current user.
- */
 exports.markInquiryRead = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
-
     const inquiry = await Inquiry.findById(req.params.id);
     if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
     if (!canReadInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
-
     let touched = false;
-
     inquiry.messages.forEach((m) => {
       if (!m.readBy?.some(x => String(x) === uid)) {
         m.readBy = [...(m.readBy || []), uid];
         touched = true;
       }
     });
-
-    if (String(inquiry.guestId) === uid) {
-      inquiry.unreadCountGuest = 0;
-    } else if (String(inquiry.hostId) === uid) {
-      inquiry.unreadCountHost = 0;
-    }
-
+    if (String(inquiry.guestId) === uid) inquiry.unreadCountGuest = 0;
+    else if (String(inquiry.hostId) === uid) inquiry.unreadCountHost = 0;
     if (touched) {
       inquiry.updatedAt = new Date();
       await inquiry.save();
     }
-
     return res.json({ ok: true });
   } catch (err) { next(err); }
 };
@@ -255,27 +173,18 @@ exports.setInquiryStatus = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
-
     const inquiry = await Inquiry.findById(req.params.id);
     if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
     if (!canReadInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
-
     const allowed = ["open", "closed", "archived", "resolved"];
     const status = String(req.body?.status || "").toLowerCase();
-    if (!allowed.includes(status)) {
-      return res.status(400).json({ message: "Invalid status" });
-    }
-
+    if (!allowed.includes(status)) return res.status(400).json({ message: "Invalid status" });
     const isHost = String(inquiry.hostId) === uid;
     const isGuest = String(inquiry.guestId) === uid;
-    if (!(isHost || isAdmin(req.user) || isGuest)) {
-      return res.status(403).json({ message: "Forbidden" });
-    }
-
+    if (!(isHost || isAdmin(req.user) || isGuest)) return res.status(403).json({ message: "Forbidden" });
     inquiry.status = status;
     inquiry.updatedAt = new Date();
     await inquiry.save();
-
     return res.json({ ok: true, status: inquiry.status });
   } catch (err) { next(err); }
 };
