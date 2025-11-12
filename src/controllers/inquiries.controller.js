@@ -1,9 +1,17 @@
+// controllers/inquiries.controller.js
 const mongoose = require("mongoose");
 
 function isISODate(s) { return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s); }
 function isTimeHHMM(s) { return !s || /^\d{2}:\d{2}$/.test(String(s)); }
-function toMinutes(t) { if (!isTimeHHMM(t)) return null; const [h, m] = String(t).split(":").map(Number); return h * 60 + m; }
-function diffHours(dateA, timeA, dateB, timeB) { try { const start = new Date(`${dateA}T${timeA || "00:00"}:00Z`); const end = new Date(`${dateB}T${timeB || "00:00"}:00Z`); const ms = end - start; if (ms <= 0) return 0; const hours = ms / 36e5; return Math.ceil(hours * 4) / 4; } catch { return 0; } }
+function diffHours(dateA, timeA, dateB, timeB) {
+  try {
+    const start = new Date(`${dateA}T${timeA || "00:00"}:00Z`);
+    const end = new Date(`${dateB}T${timeB || "00:00"}:00Z`);
+    const ms = end - start; if (ms <= 0) return 0;
+    const hours = ms / 36e5;
+    return Math.ceil(hours * 4) / 4;
+  } catch { return 0; }
+}
 function getUserId(user) { return String(user?.id || user?.uid || user?._id || ""); }
 
 const Inquiry = mongoose.models.Inquiry || require("../models/Inquiry");
@@ -11,22 +19,62 @@ const Listing = mongoose.models.Listing || require("../models/Listing");
 const User = mongoose.models.User || require("../models/User");
 
 function isAdmin(user) { return user?.role === "admin" || user?.role === "superadmin"; }
-function canReadInquiry(inquiry, user) { const uid = getUserId(user); if (!uid) return false; if (isAdmin(user)) return true; return String(inquiry.guestId) === uid || String(inquiry.hostId) === uid; }
+function canReadInquiry(inquiry, user) {
+  const uid = getUserId(user);
+  if (!uid) return false;
+  if (isAdmin(user)) return true;
+  return String(inquiry.guestId) === uid || String(inquiry.hostId) === uid;
+}
 function canReplyInquiry(inquiry, user) { return canReadInquiry(inquiry, user); }
 
+/* ---------- helpers for populated fields ---------- */
+function listingTitleFrom(doc) {
+  const l = doc.listing || doc.listingId;
+  // Prefer server “title/name” if any, otherwise use your real fields: venue → address → city
+  return (
+    l?.title ||
+    l?.name ||
+    l?.venue ||
+    l?.address ||
+    l?.city ||
+    "Conversation"
+  );
+}
+
+function listingPhotoFrom(doc) {
+  const l = doc.listing || doc.listingId;
+  if (!l) return "";
+  // Try coverPhoto, then photos[0]. If you store only photosMeta (no URL), leave blank.
+  const fromArray = Array.isArray(l.photos) && l.photos.length ? l.photos[0] : "";
+  const fromMetaUrl =
+    Array.isArray(l.photosMeta) && l.photosMeta[0]?.url ? l.photosMeta[0].url : "";
+  return l.coverPhoto || fromArray || fromMetaUrl || "";
+}
+
+function hostNameFrom(doc) {
+  const h = doc.host || doc.hostId;
+  return h?.fullName || h?.name || "";
+}
+function hostAvatarFrom(doc) {
+  const h = doc.host || doc.hostId;
+  return h?.avatar || "";
+}
+
+/* ---------- mappers ---------- */
 function mapThreadSummary(doc, meId) {
   const lastMsg = (doc.messages || [])[doc.messages.length - 1];
-  const youAreGuest = String(doc.guestId) === String(meId);
+  const youAreGuest = String(doc.guestId?._id || doc.guestId) === String(meId);
   const unread = youAreGuest ? (doc.unreadCountGuest || 0) : (doc.unreadCountHost || 0);
   return {
     id: String(doc._id),
-    space: doc.listingTitle || doc.listingName || "Conversation",
-    host: doc.hostName || "",
-    avatar: doc.hostAvatar || "",
+    space: listingTitleFrom(doc),     // ← now uses venue/address if needed
+    host: hostNameFrom(doc),
+    avatar: hostAvatarFrom(doc),
     last: lastMsg?.body || "",
     time: doc.lastMessageAt ? new Date(doc.lastMessageAt).toLocaleString() : "",
     unread,
     reservation: doc.reservation || null,
+    listingPhoto: listingPhotoFrom(doc),
   };
 }
 
@@ -40,21 +88,28 @@ function mapMessages(doc, meId) {
   }));
 }
 
+/* ================== CREATE ================== */
 exports.createInquiry = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
+
     const { listingId, message, to, meta = {} } = req.body || {};
     if (!listingId) return res.status(400).json({ message: "listingId is required" });
+
     const body = String(message || "").trim();
     if (!body || body.length < 3) return res.status(400).json({ message: "Message is too short" });
+
     const listing = await Listing.findById(listingId).lean();
     if (!listing) return res.status(404).json({ message: "Listing not found" });
+
     const hostId = String(to || listing.owner || listing.ownerId || "");
     if (!hostId) return res.status(400).json({ message: "Host not found for this listing" });
+
     const guestId = String(uid);
     if (guestId === hostId) return res.status(400).json({ message: "You cannot inquire on your own listing" });
 
+    // sanitize meta
     const cleanMeta = {};
     if (isISODate(meta.startDate)) cleanMeta.startDate = meta.startDate;
     if (isISODate(meta.endDate)) cleanMeta.endDate = meta.endDate;
@@ -70,6 +125,7 @@ exports.createInquiry = async (req, res, next) => {
 
     const key = `${guestId}_${hostId}_${listingId}`;
     const now = new Date();
+
     const doc = await Inquiry.create({
       listingId,
       hostId,
@@ -84,83 +140,128 @@ exports.createInquiry = async (req, res, next) => {
       unreadCountHost: 1,
       unreadCountGuest: 0,
     });
+
     return res.status(201).json({ ok: true, inquiry: doc });
   } catch (err) { next(err); }
 };
 
+/* ================== LIST ================== */
 exports.listMyInquiries = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
+
     const role = String(req.query.role || "guest").toLowerCase();
     const filter = role === "host" ? { hostId: uid } : { guestId: uid };
-    const list = await Inquiry.find(filter).sort({ lastMessageAt: -1 }).select("-messages.body").lean();
-    const threads = list.map(d => mapThreadSummary(d, uid));
+
+    const list = await Inquiry.find(filter)
+      .sort({ lastMessageAt: -1 })
+      .slice("messages", -1)
+      .populate({
+        path: "listingId",
+        // IMPORTANT: include venue/address/city since your schema uses them
+        select: "title name venue address city photos coverPhoto photosMeta",
+      })
+      .populate({ path: "hostId", select: "fullName name avatar" })
+      .lean();
+
+    const enriched = list.map(d => ({
+      ...d,
+      listing: d.listingId || null,
+      host: d.hostId || null,
+    }));
+
+    const threads = enriched.map(d => mapThreadSummary(d, uid));
     return res.json({ ok: true, threads });
   } catch (err) { next(err); }
 };
 
+/* ================== GET ONE ================== */
 exports.getInquiry = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
-    const inquiry = await Inquiry.findById(req.params.id);
+
+    const inquiry = await Inquiry.findById(req.params.id)
+      .populate({
+        path: "listingId",
+        select: "title name venue address city photos coverPhoto photosMeta",
+      })
+      .populate({ path: "hostId", select: "fullName name avatar" });
+
     if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
     if (!canReadInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
+
     return res.json({ ok: true, inquiry });
   } catch (err) { next(err); }
 };
 
+/* ================== MESSAGES ================== */
 exports.getInquiryMessages = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
+
     const inquiry = await Inquiry.findById(req.params.id);
     if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
     if (!canReadInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
+
     const msgs = mapMessages(inquiry, uid);
     return res.json({ ok: true, messages: msgs });
   } catch (err) { next(err); }
 };
 
+/* ================== REPLY ================== */
 exports.replyInquiry = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
+
     const inquiry = await Inquiry.findById(req.params.id);
     if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
     if (!canReplyInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
+
     const body = String(req.body?.message || "").trim();
     if (!body || body.length < 2) return res.status(400).json({ message: "Message is too short" });
+
     const senderId = String(uid);
     const now = new Date();
+
     inquiry.messages.push({ senderId, body, createdAt: now, readBy: [senderId] });
+
     const isGuest = String(inquiry.guestId) === senderId;
     if (isGuest) inquiry.unreadCountHost = (inquiry.unreadCountHost || 0) + 1;
     else inquiry.unreadCountGuest = (inquiry.unreadCountGuest || 0) + 1;
+
     inquiry.lastMessageAt = now;
     inquiry.updatedAt = now;
     await inquiry.save();
+
     return res.json({ ok: true, inquiry });
   } catch (err) { next(err); }
 };
 
+/* ================== MARK READ ================== */
 exports.markInquiryRead = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
+
     const inquiry = await Inquiry.findById(req.params.id);
     if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
     if (!canReadInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
+
     let touched = false;
     inquiry.messages.forEach((m) => {
-      if (!m.readBy?.some(x => String(x) === uid)) {
+      if (!m.readBy?.some(x => String(x) === String(uid))) {
         m.readBy = [...(m.readBy || []), uid];
         touched = true;
       }
     });
+
     if (String(inquiry.guestId) === uid) inquiry.unreadCountGuest = 0;
     else if (String(inquiry.hostId) === uid) inquiry.unreadCountHost = 0;
+
     if (touched) {
       inquiry.updatedAt = new Date();
       await inquiry.save();
@@ -169,22 +270,26 @@ exports.markInquiryRead = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+/* ================== SET STATUS ================== */
 exports.setInquiryStatus = async (req, res, next) => {
   try {
     const uid = getUserId(req.user);
     if (!uid) return res.status(401).json({ message: "Unauthorized" });
+
+    const { status } = req.body || {};
+    const allowed = ["open", "closed", "archived", "resolved"];
+    if (!allowed.includes(String(status))) {
+      return res.status(400).json({ message: `Status must be one of: ${allowed.join(", ")}` });
+    }
+
     const inquiry = await Inquiry.findById(req.params.id);
     if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
     if (!canReadInquiry(inquiry, req.user)) return res.status(403).json({ message: "Forbidden" });
-    const allowed = ["open", "closed", "archived", "resolved"];
-    const status = String(req.body?.status || "").toLowerCase();
-    if (!allowed.includes(status)) return res.status(400).json({ message: "Invalid status" });
-    const isHost = String(inquiry.hostId) === uid;
-    const isGuest = String(inquiry.guestId) === uid;
-    if (!(isHost || isAdmin(req.user) || isGuest)) return res.status(403).json({ message: "Forbidden" });
+
     inquiry.status = status;
     inquiry.updatedAt = new Date();
     await inquiry.save();
-    return res.json({ ok: true, status: inquiry.status });
+
+    return res.json({ ok: true, inquiry });
   } catch (err) { next(err); }
 };
