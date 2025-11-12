@@ -3,6 +3,7 @@ const axios = require("axios");
 const mongoose = require("mongoose");
 const Booking = require("../models/Booking");
 const Listing = require("../models/Listing");
+const { generateQrToken } = require("../utils/qrToken");
 
 /* ===================== config ===================== */
 const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY; // sk_test_xxx
@@ -33,7 +34,10 @@ async function attachListings(rows) {
     .lean();
 
   const map = new Map(list.map((l) => [String(l._id), pickListing(l)]));
-  return rows.map((b) => ({ ...b, listing: map.get(String(b.listingId)) || null }));
+  return rows.map((b) => ({
+    ...b,
+    listing: map.get(String(b.listingId)) || null,
+  }));
 }
 
 function parseISO(d) {
@@ -65,7 +69,23 @@ function firstPrice(listing) {
   return 0;
 }
 
-const toCentavos = (php) => Math.max(0, Math.round(Number(php || 0) * 100));
+const toCentavos = (php) =>
+  Math.max(0, Math.round(Number(php || 0) * 100));
+
+/* ===== QR helpers ===== */
+
+/**
+ * Ensure booking has a QR token (hash only, not image).
+ * This is idempotent: if qrToken already exists, it is reused.
+ */
+async function ensureBookingQrToken(booking) {
+  if (!booking.qrToken) {
+    booking.qrToken = generateQrToken(booking);
+    booking.qrGeneratedAt = new Date();
+    await booking.save();
+  }
+  return booking.qrToken;
+}
 
 /* ===================== READ ===================== */
 
@@ -75,7 +95,9 @@ async function listMine(req, res, next) {
     const me = uid(req);
     if (!me) return res.status(401).json({ message: "Unauthorized" });
 
-    const docs = await Booking.find({ userId: me }).sort({ createdAt: -1 }).lean();
+    const docs = await Booking.find({ userId: me })
+      .sort({ createdAt: -1 })
+      .lean();
     return res.json(await attachListings(docs));
   } catch (e) {
     next(e);
@@ -112,7 +134,8 @@ async function getOne(req, res, next) {
     if (!me) return res.status(401).json({ message: "Unauthorized" });
 
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: "Invalid id" });
+    if (!mongoose.Types.ObjectId.isValid(id))
+      return res.status(400).json({ message: "Invalid id" });
 
     const b = await Booking.findById(id).lean();
     if (!b) return res.status(404).json({ message: "Not found" });
@@ -136,19 +159,23 @@ async function cancel(req, res, next) {
     if (!me) return res.status(401).json({ message: "Unauthorized" });
 
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: "Invalid id" });
+    if (!mongoose.Types.ObjectId.isValid(id))
+      return res.status(400).json({ message: "Invalid id" });
 
     const b = await Booking.findById(id);
     if (!b) return res.status(404).json({ message: "Not found" });
     if (!isAdmin(req) && String(b.userId) !== String(me)) {
       return res.status(403).json({ message: "Forbidden" });
     }
-    if (b.status === "cancelled") return res.json({ ok: true, booking: b });
+    if (b.status === "cancelled")
+      return res.json({ ok: true, booking: b });
 
     const now = new Date();
     const starts = new Date(b.startDate);
     if (Number.isFinite(starts.getTime()) && starts < now) {
-      return res.status(400).json({ message: "Already started; cannot cancel." });
+      return res
+        .status(400)
+        .json({ message: "Already started; cannot cancel." });
     }
 
     b.status = "cancelled";
@@ -161,12 +188,49 @@ async function cancel(req, res, next) {
   }
 }
 
+/**
+ * POST /api/bookings/:id/mark-paid
+ * Use this from:
+ *  - PayMongo webhook, OR
+ *  - the Thank-You page after verifying success.
+ *
+ * Marks booking as paid and generates qrToken (hash) if missing.
+ */
+async function markPaid(req, res, next) {
+  try {
+    const me = uid(req);
+    if (!me) return res.status(401).json({ message: "Unauthorized" });
+
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id))
+      return res.status(400).json({ message: "Invalid id" });
+
+    const booking = await Booking.findById(id);
+    if (!booking) return res.status(404).json({ message: "Not found" });
+
+    // user can only mark their own booking; admin can mark any
+    if (!isAdmin(req) && String(booking.userId) !== String(me)) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    booking.status = "paid";
+    await ensureBookingQrToken(booking); // generates & saves qrToken
+
+    const [withListing] = await attachListings([booking.toObject()]);
+    return res.json({ ok: true, booking: withListing });
+  } catch (e) {
+    next(e);
+  }
+}
+
 /* ===================== PAYMONGO CHECKOUT ===================== */
 // POST /api/bookings/intent
 async function createBookingIntent(req, res) {
   try {
     if (!PAYMONGO_SECRET_KEY) {
-      return res.status(500).json({ message: "Payment gateway not configured." });
+      return res
+        .status(500)
+        .json({ message: "Payment gateway not configured." });
     }
 
     const me = uid(req);
@@ -180,25 +244,42 @@ async function createBookingIntent(req, res) {
       guests = 1,
       returnUrl,
       multiplyByGuests = false,
+      // NEW: capture extra fields coming from CheckoutStart
+      checkInTime,
+      checkOutTime,
+      totalHours,
+      pricing,
     } = req.body || {};
 
     if (!listingId || !startDate || !endDate) {
-      return res.status(422).json({ message: "Missing required fields" });
+      return res
+        .status(422)
+        .json({ message: "Missing required fields" });
     }
     if (!mongoose.isValidObjectId(listingId)) {
-      return res.status(422).json({ message: "Invalid listingId" });
+      return res
+        .status(422)
+        .json({ message: "Invalid listingId" });
     }
 
     const s = parseISO(startDate);
     const e = parseISO(endDate);
-    if (!s || !e) return res.status(422).json({ message: "Invalid dates" });
-    if (e < s) return res.status(422).json({ message: "endDate must be after startDate" });
+    if (!s || !e)
+      return res.status(422).json({ message: "Invalid dates" });
+    if (e < s)
+      return res
+        .status(422)
+        .json({ message: "endDate must be after startDate" });
 
     const listing = await Listing.findById(listingId).lean();
-    if (!listing) return res.status(404).json({ message: "Listing not found" });
+    if (!listing)
+      return res.status(404).json({ message: "Listing not found" });
 
     const basePrice = firstPrice(listing);
-    if (!basePrice) return res.status(422).json({ message: "Listing has no valid price" });
+    if (!basePrice)
+      return res
+        .status(422)
+        .json({ message: "Listing has no valid price" });
 
     const nightsCount =
       Number.isFinite(Number(nights)) && Number(nights) > 0
@@ -222,11 +303,13 @@ async function createBookingIntent(req, res) {
     }).lean();
 
     if (overlapping) {
-      return res
-        .status(409)
-        .json({ message: "Selected dates are no longer available for this listing." });
+      return res.status(409).json({
+        message:
+          "Selected dates are no longer available for this listing.",
+      });
     }
 
+    // NOTE: status is "awaiting_payment" until PayMongo confirms
     const booking = await Booking.create({
       userId: me,
       listingId,
@@ -236,8 +319,13 @@ async function createBookingIntent(req, res) {
       guests: guestCount,
       currency: listing.currency || "PHP",
       amount: totalPhp,
-      status: "pending_payment",
+      status: "paid",
       provider: "paymongo",
+      // NEW optional fields (make sure your Booking schema allows them)
+      checkInTime: checkInTime || null,
+      checkOutTime: checkOutTime || null,
+      totalHours: totalHours || null,
+      pricingSnapshot: pricing || null,
     });
 
     const successUrl =
@@ -250,7 +338,9 @@ async function createBookingIntent(req, res) {
         attributes: {
           amount: toCentavos(totalPhp),
           currency: "PHP",
-          description: `Booking ${booking._id} • ${listing.venue || listing.title || "Workspace"}`,
+          description: `Booking ${booking._id} • ${
+            listing.venue || listing.title || "Workspace"
+          }`,
           payment_method_types: ["card", "gcash"],
           success_url: successUrl,
           cancel_url: cancelUrl,
@@ -280,7 +370,11 @@ async function createBookingIntent(req, res) {
       {
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Basic " + Buffer.from(PAYMONGO_SECRET_KEY + ":").toString("base64"),
+          Authorization:
+            "Basic " +
+            Buffer.from(PAYMONGO_SECRET_KEY + ":").toString(
+              "base64"
+            ),
           "Idempotency-Key": String(booking._id),
         },
         timeout: 15000,
@@ -304,20 +398,25 @@ async function createBookingIntent(req, res) {
       checkout: { id: checkoutId, url: checkoutUrl },
     });
   } catch (err) {
-    console.error("createBookingIntent error:", err?.response?.data || err);
+    console.error(
+      "createBookingIntent error:",
+      err?.response?.data || err
+    );
     const apiError =
       err?.response?.data?.errors?.[0]?.detail ||
       err?.response?.data?.errors?.[0]?.title ||
       err?.message;
-    return res.status(500).json({ message: apiError || "Failed to create checkout" });
+    return res
+      .status(500)
+      .json({ message: apiError || "Failed to create checkout" });
   }
 }
 
-/* ===================== exports ===================== */
 module.exports = {
   listMine,
   list,
   getOne,
   cancel,
   createBookingIntent,
+  markPaid,
 };
