@@ -3,13 +3,13 @@ const axios = require("axios");
 const mongoose = require("mongoose");
 const Booking = require("../models/Booking");
 const Listing = require("../models/Listing");
+const User = require("../models/User");
 const { generateQrToken } = require("../utils/qrToken");
+const { sendBookingConfirmationEmail } = require("../utils/mailer");
 
-/* ===================== config ===================== */
-const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY; // sk_test_xxx
+const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY;
 const APP_URL = process.env.APP_URL || "http://localhost:5173";
 
-/* ===================== helpers ===================== */
 const uid = (req) => req.user?._id || req.user?.id || req.user?.uid || null;
 const isAdmin = (req) => String(req.user?.role || "").toLowerCase() === "admin";
 
@@ -72,12 +72,6 @@ function firstPrice(listing) {
 const toCentavos = (php) =>
   Math.max(0, Math.round(Number(php || 0) * 100));
 
-/* ===== QR helpers ===== */
-
-/**
- * Ensure booking has a QR token (hash only, not image).
- * This is idempotent: if qrToken already exists, it is reused.
- */
 async function ensureBookingQrToken(booking) {
   if (!booking.qrToken) {
     booking.qrToken = generateQrToken(booking);
@@ -87,9 +81,106 @@ async function ensureBookingQrToken(booking) {
   return booking.qrToken;
 }
 
+function buildDateTime(dateStr, timeStr, kind = "start") {
+  if (!dateStr) return null;
+  const t =
+    typeof timeStr === "string" && /^\d{2}:\d{2}$/.test(timeStr)
+      ? timeStr
+      : kind === "end"
+      ? "23:59"
+      : "00:00";
+
+  const iso = `${dateStr}T${t}:00`;
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+async function findOverlappingBooking({
+  listingId,
+  startDate,
+  endDate,
+  checkInTime,
+  checkOutTime,
+  excludeBookingId,
+}) {
+  const windowStart = buildDateTime(startDate, checkInTime, "start");
+  const windowEnd = buildDateTime(endDate, checkOutTime, "end");
+
+  if (!windowStart || !windowEnd || windowEnd <= windowStart) return null;
+
+  const q = {
+    listingId,
+    status: { $ne: "cancelled" },
+  };
+
+  if (excludeBookingId && mongoose.Types.ObjectId.isValid(excludeBookingId)) {
+    q._id = { $ne: excludeBookingId };
+  }
+
+  const dateOverlapFilter = {
+    $expr: {
+      $and: [
+        { $lte: [{ $toDate: "$startDate" }, new Date(endDate)] },
+        { $gte: [{ $toDate: "$endDate" }, new Date(startDate)] },
+      ],
+    },
+  };
+
+  const candidates = await Booking.find({ ...q, ...dateOverlapFilter })
+    .select("_id startDate endDate checkInTime checkOutTime status")
+    .lean();
+
+  for (const b of candidates) {
+    const bStart = buildDateTime(b.startDate, b.checkInTime, "start");
+    const bEnd = buildDateTime(b.endDate, b.checkOutTime, "end");
+    if (!bStart || !bEnd) continue;
+    if (windowStart < bEnd && bStart < windowEnd) {
+      return b;
+    }
+  }
+
+  return null;
+}
+
+function expandNights(startDate, endDate) {
+  const s = parseISO(startDate);
+  const e = parseISO(endDate);
+  if (!s || !e || e <= s) return [];
+  const out = [];
+  const d = new Date(s);
+  while (d < e) {
+    out.push(d.toISOString().slice(0, 10));
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+async function sendBookingEmailSafe(booking) {
+  try {
+    const [user, listing] = await Promise.all([
+      User.findById(booking.userId)
+        .select("email name firstName lastName")
+        .lean(),
+      Listing.findById(booking.listingId)
+        .select("title venue city country address")
+        .lean(),
+    ]);
+
+    if (!user || !user.email) return;
+
+    await sendBookingConfirmationEmail({
+      to: user.email,
+      user,
+      booking: booking.toObject ? booking.toObject() : booking,
+      listing,
+    });
+  } catch (err) {
+    console.error("Failed to send booking confirmation email:", err);
+  }
+}
+
 /* ===================== READ ===================== */
 
-// GET /api/bookings/me
 async function listMine(req, res, next) {
   try {
     const me = uid(req);
@@ -104,7 +195,6 @@ async function listMine(req, res, next) {
   }
 }
 
-// GET /api/bookings  (user: own; admin + ?all=1 -> all; optional ?userId=&status=)
 async function list(req, res, next) {
   try {
     const me = uid(req);
@@ -127,7 +217,6 @@ async function list(req, res, next) {
   }
 }
 
-// GET /api/bookings/:id
 async function getOne(req, res, next) {
   try {
     const me = uid(req);
@@ -150,9 +239,78 @@ async function getOne(req, res, next) {
   }
 }
 
+async function getBlockedDates(req, res, next) {
+  try {
+    const { listingId } = req.query || {};
+
+    if (!listingId || !mongoose.isValidObjectId(listingId)) {
+      return res.status(422).json({ message: "Invalid listingId" });
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const bookings = await Booking.find({
+      listingId,
+      status: { $ne: "cancelled" },
+      endDate: { $gte: today.toISOString().slice(0, 10) },
+    })
+      .select("startDate endDate status")
+      .lean();
+
+    const set = new Set();
+    for (const b of bookings) {
+      for (const d of expandNights(b.startDate, b.endDate)) {
+        set.add(d);
+      }
+    }
+
+    const blockedDates = Array.from(set).sort();
+    return res.json({ blockedDates });
+  } catch (e) {
+    next(e);
+  }
+}
+
+/* ===================== AVAILABILITY ===================== */
+
+async function checkAvailability(req, res, next) {
+  try {
+    const {
+      listingId,
+      startDate,
+      endDate,
+      checkInTime,
+      checkOutTime,
+      excludeBookingId,
+    } = req.body || {};
+
+    if (!listingId || !mongoose.isValidObjectId(listingId)) {
+      return res.status(422).json({ message: "Invalid listingId" });
+    }
+    if (!startDate || !endDate) {
+      return res
+        .status(422)
+        .json({ message: "Missing startDate or endDate" });
+    }
+
+    const overlap = await findOverlappingBooking({
+      listingId,
+      startDate,
+      endDate,
+      checkInTime,
+      checkOutTime,
+      excludeBookingId,
+    });
+
+    return res.json({ available: !overlap });
+  } catch (e) {
+    next(e);
+  }
+}
+
 /* ===================== WRITE ===================== */
 
-// POST /api/bookings/:id/cancel
 async function cancel(req, res, next) {
   try {
     const me = uid(req);
@@ -188,14 +346,6 @@ async function cancel(req, res, next) {
   }
 }
 
-/**
- * POST /api/bookings/:id/mark-paid
- * Use this from:
- *  - PayMongo webhook, OR
- *  - the Thank-You page after verifying success.
- *
- * Marks booking as paid and generates qrToken (hash) if missing.
- */
 async function markPaid(req, res, next) {
   try {
     const me = uid(req);
@@ -208,13 +358,14 @@ async function markPaid(req, res, next) {
     const booking = await Booking.findById(id);
     if (!booking) return res.status(404).json({ message: "Not found" });
 
-    // user can only mark their own booking; admin can mark any
     if (!isAdmin(req) && String(booking.userId) !== String(me)) {
       return res.status(403).json({ message: "Forbidden" });
     }
 
     booking.status = "paid";
-    await ensureBookingQrToken(booking); // generates & saves qrToken
+    await ensureBookingQrToken(booking);
+
+    await sendBookingEmailSafe(booking);
 
     const [withListing] = await attachListings([booking.toObject()]);
     return res.json({ ok: true, booking: withListing });
@@ -224,7 +375,7 @@ async function markPaid(req, res, next) {
 }
 
 /* ===================== PAYMONGO CHECKOUT ===================== */
-// POST /api/bookings/intent
+
 async function createBookingIntent(req, res) {
   try {
     if (!PAYMONGO_SECRET_KEY) {
@@ -244,7 +395,6 @@ async function createBookingIntent(req, res) {
       guests = 1,
       returnUrl,
       multiplyByGuests = false,
-      // NEW: capture extra fields coming from CheckoutStart
       checkInTime,
       checkOutTime,
       totalHours,
@@ -290,26 +440,22 @@ async function createBookingIntent(req, res) {
     const perGuestFactor = multiplyByGuests ? guestCount : 1;
     const totalPhp = basePrice * nightsCount * perGuestFactor;
 
-    // simple overlap guard (ignores cancelled)
-    const overlapping = await Booking.findOne({
+    const overlapping = await findOverlappingBooking({
       listingId,
-      status: { $ne: "cancelled" },
-      $expr: {
-        $and: [
-          { $lte: [{ $toDate: "$startDate" }, new Date(endDate)] },
-          { $gte: [{ $toDate: "$endDate" }, new Date(startDate)] },
-        ],
-      },
-    }).lean();
+      startDate,
+      endDate,
+      checkInTime,
+      checkOutTime,
+    });
 
     if (overlapping) {
       return res.status(409).json({
         message:
-          "Selected dates are no longer available for this listing.",
+          "Selected dates and times are no longer available for this listing.",
+        conflictBookingId: String(overlapping._id),
       });
     }
 
-    // NOTE: status is "awaiting_payment" until PayMongo confirms
     const booking = await Booking.create({
       userId: me,
       listingId,
@@ -321,7 +467,6 @@ async function createBookingIntent(req, res) {
       amount: totalPhp,
       status: "paid",
       provider: "paymongo",
-      // NEW optional fields (make sure your Booking schema allows them)
       checkInTime: checkInTime || null,
       checkOutTime: checkOutTime || null,
       totalHours: totalHours || null,
@@ -419,4 +564,6 @@ module.exports = {
   cancel,
   createBookingIntent,
   markPaid,
+  checkAvailability,
+  getBlockedDates,
 };

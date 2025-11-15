@@ -28,6 +28,7 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.get("/api/health", (_req, res) => res.json({ status: "up" }));
+app.use("/api", require("./src/routes/emailTest.routes"));
 
 app.use("/api/auth", require("./src/routes/auth.routes"));
 app.use("/api/users", require("./src/routes/users.routes"));
