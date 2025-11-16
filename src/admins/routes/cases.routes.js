@@ -1,20 +1,16 @@
 const express = require("express");
 const router = express.Router();
 
-const {
-  listCases,
-  assignCase,
-  updateCaseStatus,
-  updateCaseNotes,
-  recordCaseRefund,
-  addCaseEvidence,
-} = require("../controllers/cases.controller");
+const { requireAuth, requireAdmin } = require("../../middleware/auth");
+const casesController = require("../controllers/cases.controller");
 
-router.get("/cases", listCases);
-router.patch("/cases/:id/assign", assignCase);
-router.patch("/cases/:id/status", updateCaseStatus);
-router.patch("/cases/:id/notes", updateCaseNotes);
-router.patch("/cases/:id/refund", recordCaseRefund);
-router.patch("/cases/:id/evidence", addCaseEvidence);
+router.use(requireAuth, requireAdmin);
+
+router.get("/", casesController.listCases);
+router.patch("/:id/assign", casesController.assignCase);
+router.patch("/:id/status", casesController.updateCaseStatus);
+router.patch("/:id/notes", casesController.updateCaseNotes);
+router.patch("/:id/refund", casesController.recordCaseRefund);
+router.patch("/:id/evidence", casesController.addCaseEvidence);
 
 module.exports = router;
