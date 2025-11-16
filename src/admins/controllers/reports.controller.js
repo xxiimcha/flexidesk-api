@@ -1,4 +1,4 @@
-// src/controllers/adminReports.controller.js
+// src/admins/controllers/reports.controller.js
 const mongoose = require("mongoose");
 const Listing = require("../../models/Listing");
 const Booking = require("../../models/Booking");
@@ -31,6 +31,15 @@ function diffDaysSafe(a, b) {
   return Math.max(1, raw || 1);
 }
 
+function getBookingNights(b) {
+  if (typeof b.nights === "number" && !Number.isNaN(b.nights)) {
+    return Math.max(1, b.nights);
+  }
+  const start = b.startDate || b.checkInDate;
+  const end = b.endDate || b.checkOutDate;
+  return diffDaysSafe(start, end);
+}
+
 exports.getWorkspacePerformance = async function getWorkspacePerformance(req, res) {
   try {
     const role = String(req.user?.role || "").toLowerCase();
@@ -47,23 +56,37 @@ exports.getWorkspacePerformance = async function getWorkspacePerformance(req, re
     const { start, end, days } = getRangeFromPreset(datePreset);
 
     const listings = await Listing.find({})
-      .select("_id title name brand branch type capacity status updatedAt")
+      .select("_id title name brand branch type category scope capacity seats status updatedAt createdAt")
       .lean();
 
     const listingIds = listings.map((l) => l._id);
 
     const bookings = await Booking.find({
-      listing: { $in: listingIds },
+      $or: [
+        { listing: { $in: listingIds } },
+        { listingId: { $in: listingIds } },
+      ],
       createdAt: { $gte: start, $lte: end },
     })
-      .select("listing status totalPrice checkInDate checkOutDate createdAt")
+      .select(
+        "listing listingId status amount totalPrice startDate endDate checkInDate checkOutDate nights totalHours createdAt",
+      )
       .lean();
 
     const reviewsAgg = await Review.aggregate([
-      { $match: { listing: { $in: listingIds } } },
+      {
+        $match: {
+          $or: [
+            { listing: { $in: listingIds } },
+            { listingId: { $in: listingIds } },
+          ],
+        },
+      },
       {
         $group: {
-          _id: "$listing",
+          _id: {
+            $ifNull: ["$listing", "$listingId"],
+          },
           avgRating: { $avg: "$rating" },
         },
       },
@@ -71,6 +94,7 @@ exports.getWorkspacePerformance = async function getWorkspacePerformance(req, re
 
     const ratingMap = new Map();
     for (const r of reviewsAgg) {
+      if (!r._id) continue;
       ratingMap.set(String(r._id), r.avgRating || 0);
     }
 
@@ -86,8 +110,15 @@ exports.getWorkspacePerformance = async function getWorkspacePerformance(req, re
 
     for (const listing of listings) {
       const lid = String(listing._id);
-      const workspaceBookings = bookings.filter((b) => String(b.listing) === lid);
-      const paidBookingsList = workspaceBookings.filter((b) => paidStatuses.has(String(b.status || "").toLowerCase()));
+
+      const workspaceBookings = bookings.filter((b) => {
+        const bid = b.listing || b.listingId;
+        return String(bid) === lid;
+      });
+
+      const paidBookingsList = workspaceBookings.filter((b) =>
+        paidStatuses.has(String(b.status || "").toLowerCase()),
+      );
       const cancelledBookingsList = workspaceBookings.filter((b) =>
         cancelledStatuses.has(String(b.status || "").toLowerCase()),
       );
@@ -96,15 +127,24 @@ exports.getWorkspacePerformance = async function getWorkspacePerformance(req, re
       let nightsTotal = 0;
 
       for (const b of paidBookingsList) {
-        revenue += Number(b.totalPrice || 0);
-        nightsTotal += diffDaysSafe(b.checkInDate, b.checkOutDate);
+        const bookingAmount = Number(
+          b.amount ?? b.totalPrice ?? 0,
+        );
+        revenue += bookingAmount;
+        nightsTotal += getBookingNights(b);
       }
 
-      const occupancy = days > 0 ? Math.min(1, nightsTotal / days) : 0;
+      let capacity = Number(
+        listing.capacity ?? listing.seats ?? 0,
+      );
+      if (!Number.isFinite(capacity) || capacity < 0) capacity = 0;
+
+      const occupancy =
+        days > 0 ? Math.min(1, nightsTotal / days) : 0;
+
       const cancelRate =
         workspaceBookings.length > 0 ? cancelledBookingsList.length / workspaceBookings.length : 0;
 
-      const capacity = Number(listing.capacity || 0) || 0;
       const revPerSeat = capacity > 0 ? revenue / capacity : revenue;
 
       const avgRatingListing = ratingMap.get(lid) || 0;
@@ -123,7 +163,7 @@ exports.getWorkspacePerformance = async function getWorkspacePerformance(req, re
         name: listing.title || listing.name || "Untitled workspace",
         brand: listing.brand || "Unknown",
         branch: listing.branch || "Unknown",
-        type: listing.type || "Workspace",
+        type: listing.type || listing.category || listing.scope || "Workspace",
         capacity,
         occupancy,
         bookings: paidBookingsList.length,
