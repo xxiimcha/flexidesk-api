@@ -4,11 +4,37 @@ const Booking = require("../../models/Booking");
 const Listing = require("../../models/Listing");
 
 /* Helper – mirror your other controllers */
-const uid = (req) => req.user?._id || req.user?.id || req.user?.uid || null;
+const uid = (req) =>
+  req.user?._id || req.user?.id || req.user?.uid || null;
 
+/**
+ * GET /api/owner/analytics/summary
+ *
+ * Response:
+ * {
+ *   totalEarnings: Number,
+ *   occupancyRate: Number,
+ *   avgDailyEarnings: Number,
+ *   peakHours: string[],
+ *   listingStats: [
+ *     {
+ *       listingId,
+ *       title,
+ *       city,
+ *       bookings,
+ *       revenue,
+ *       occupancyRate
+ *     }
+ *   ]
+ * }
+ */
 async function getOwnerAnalyticsSummary(req, res) {
   try {
     const ownerId = uid(req);
+
+    console.log("[Analytics] req.user:", req.user);
+    console.log("[Analytics] ownerId (string):", ownerId);
+
     if (!ownerId) {
       return res.status(401).json({ message: "Unauthorized" });
     }
@@ -26,31 +52,39 @@ async function getOwnerAnalyticsSummary(req, res) {
     // Bookings that should be counted for revenue/occupancy
     const validStatuses = ["paid", "confirmed", "completed", "checked_in"];
 
-    // Common pipeline: join Listing and keep only this owner's bookings
-    const basePipeline = [
-      {
-        $lookup: {
-          from: "listings",          // Mongoose pluralized collection name
-          localField: "listingId",
-          foreignField: "_id",
-          as: "listing",
-        },
-      },
-      { $unwind: "$listing" },
-      {
-        $match: {
-          "listing.owner": ownerObjectId,
-          status: { $in: validStatuses },
-        },
-      },
-    ];
+    /* ========== 0) Get all listingIds for this owner ========== */
+    const listingIds = await Listing.find({
+      owner: ownerObjectId,
+    }).distinct("_id");
+
+    console.log(
+      "[Analytics] listingIds for owner:",
+      listingIds.map((id) => id.toString())
+    );
+
+    if (!listingIds.length) {
+      console.log("[Analytics] No listings found for owner.");
+      return res.json({
+        totalEarnings: 0,
+        occupancyRate: 0,
+        avgDailyEarnings: 0,
+        peakHours: [],
+        listingStats: [],
+      });
+    }
+
+    // Common match for bookings
+    const bookingMatchBase = {
+      listingId: { $in: listingIds },
+      status: { $in: validStatuses },
+    };
 
     // Revenue expression: prefer pricingSnapshot.total, fallback to amount
     const revenueExpr = { $ifNull: ["$pricingSnapshot.total", "$amount"] };
 
     /* ========== 1) Total earnings (all time) ========== */
     const totalAgg = await Booking.aggregate([
-      ...basePipeline,
+      { $match: bookingMatchBase },
       {
         $group: {
           _id: null,
@@ -61,11 +95,13 @@ async function getOwnerAnalyticsSummary(req, res) {
 
     const totalEarnings = totalAgg.length ? totalAgg[0].total : 0;
 
+    console.log("[Analytics] totalEarnings:", totalEarnings);
+
     /* ========== 2) Last 30 days – earnings, bookings, hours ========== */
     const last30Agg = await Booking.aggregate([
-      ...basePipeline,
       {
         $match: {
+          ...bookingMatchBase,
           createdAt: { $gte: start30, $lte: end30 },
         },
       },
@@ -80,6 +116,8 @@ async function getOwnerAnalyticsSummary(req, res) {
         },
       },
     ]);
+
+    console.log("[Analytics] last30Agg:", last30Agg);
 
     let totalLast30 = 0;
     let totalBookingsLast30 = 0;
@@ -97,10 +135,7 @@ async function getOwnerAnalyticsSummary(req, res) {
 
     /* ========== 3) Occupancy rate (simple hours-based estimate) ========== */
     // Approximate: total booked hours / (listingsCount * 24 * 30) * 100
-    const activeListingsCount = await Listing.countDocuments({
-      owner: ownerObjectId,
-      status: "active",
-    });
+    const activeListingsCount = listingIds.length;
 
     let occupancyRate = 0;
     if (activeListingsCount > 0 && daysWindow > 0) {
@@ -113,15 +148,15 @@ async function getOwnerAnalyticsSummary(req, res) {
 
     /* ========== 4) Peak hours (top 3 hours by bookings in last 30 days) ========== */
     const peakHoursAgg = await Booking.aggregate([
-      ...basePipeline,
       {
         $match: {
+          ...bookingMatchBase,
           createdAt: { $gte: start30, $lte: end30 },
         },
       },
       {
         $group: {
-          _id: { $hour: "$createdAt" }, // or use $hour on checkInTime if you store Date
+          _id: { $hour: "$createdAt" }, // or use checkIn datetime if stored as Date
           bookings: { $sum: 1 },
         },
       },
@@ -136,12 +171,21 @@ async function getOwnerAnalyticsSummary(req, res) {
 
     /* ========== 5) Listing performance (for table) ========== */
     const listingAgg = await Booking.aggregate([
-      ...basePipeline,
       {
         $match: {
+          ...bookingMatchBase,
           createdAt: { $gte: start30, $lte: end30 },
         },
       },
+      {
+        $lookup: {
+          from: "listings",
+          localField: "listingId",
+          foreignField: "_id",
+          as: "listing",
+        },
+      },
+      { $unwind: "$listing" },
       {
         $group: {
           _id: "$listingId",
@@ -155,6 +199,8 @@ async function getOwnerAnalyticsSummary(req, res) {
       },
       { $sort: { revenue: -1 } },
     ]);
+
+    console.log("[Analytics] listingAgg:", listingAgg);
 
     const listingStats = listingAgg.map((row) => {
       const capacityHours = daysWindow * 24; // per listing
