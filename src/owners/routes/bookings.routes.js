@@ -3,7 +3,9 @@ const express = require("express");
 const router = express.Router();
 
 const { getOwnerBookingsMine } = require("../controllers/owner.bookings.controller");
+const { requireAuth } = require("../../middleware/auth");
 
-router.get("/mine", getOwnerBookingsMine);
+// GET /api/owner/bookings/mine
+router.get("/mine", requireAuth, getOwnerBookingsMine);   
 
 module.exports = router;
