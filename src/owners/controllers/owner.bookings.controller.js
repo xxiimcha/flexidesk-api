@@ -70,3 +70,92 @@ exports.getOwnerBookingsMine = async function getOwnerBookingsMine(req, res) {
     });
   }
 };
+
+// GET /owner/bookings/:id
+// Used by QR scan to show booking details
+exports.getOwnerBookingOne = async function getOwnerBookingOne(req, res) {
+  try {
+    const ownerId = uid(req);
+    if (!ownerId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const { id } = req.params;
+
+    const booking = await Booking.findById(id)
+      .populate({
+        path: "listing",
+        select:
+          "title shortDesc category scope city region country currency owner",
+      })
+      .populate({
+        path: "user",
+        select: "fullName name email",
+      })
+      .exec();
+
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    if (!booking.listing || String(booking.listing.owner) !== String(ownerId)) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const obj = booking.toObject ? booking.toObject() : booking;
+    obj.id = obj._id;
+
+    return res.json(obj);
+  } catch (err) {
+    console.error("getOwnerBookingOne error:", err);
+    return res.status(500).json({ message: "Failed to load booking" });
+  }
+};
+
+// POST /owner/bookings/:id/complete
+// Called when host confirms check-in after QR scan
+exports.completeOwnerBooking = async function completeOwnerBooking(req, res) {
+  try {
+    const ownerId = uid(req);
+    if (!ownerId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const { id } = req.params;
+
+    const booking = await Booking.findById(id)
+      .populate({
+        path: "listing",
+        select: "owner",
+      })
+      .exec();
+
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    if (!booking.listing || String(booking.listing.owner) !== String(ownerId)) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    if (booking.status === "completed") {
+      return res.status(400).json({ message: "Booking already completed" });
+    }
+
+    booking.status = "completed";
+    booking.checkedInAt = new Date();
+
+    await booking.save();
+
+    const obj = booking.toObject ? booking.toObject() : booking;
+    obj.id = obj._id;
+
+    return res.json({
+      message: "Booking marked as completed",
+      booking: obj,
+    });
+  } catch (err) {
+    console.error("completeOwnerBooking error:", err);
+    return res.status(500).json({ message: "Failed to update booking status" });
+  }
+};
