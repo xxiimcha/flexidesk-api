@@ -1,4 +1,4 @@
-// src/admins/controllers/reports.controller.js
+// src/controllers/adminReports.controller.js
 const mongoose = require("mongoose");
 const Listing = require("../../models/Listing");
 const Booking = require("../../models/Booking");
@@ -56,7 +56,9 @@ exports.getWorkspacePerformance = async function getWorkspacePerformance(req, re
     const { start, end, days } = getRangeFromPreset(datePreset);
 
     const listings = await Listing.find({})
-      .select("_id title name brand branch type category scope capacity seats status updatedAt createdAt")
+      .select(
+        "_id title name venue address shortDesc brand branch type category scope capacity seats status updatedAt createdAt",
+      )
       .lean();
 
     const listingIds = listings.map((l) => l._id);
@@ -84,9 +86,7 @@ exports.getWorkspacePerformance = async function getWorkspacePerformance(req, re
       },
       {
         $group: {
-          _id: {
-            $ifNull: ["$listing", "$listingId"],
-          },
+          _id: { $ifNull: ["$listing", "$listingId"] },
           avgRating: { $avg: "$rating" },
         },
       },
@@ -127,20 +127,15 @@ exports.getWorkspacePerformance = async function getWorkspacePerformance(req, re
       let nightsTotal = 0;
 
       for (const b of paidBookingsList) {
-        const bookingAmount = Number(
-          b.amount ?? b.totalPrice ?? 0,
-        );
+        const bookingAmount = Number(b.amount ?? b.totalPrice ?? 0);
         revenue += bookingAmount;
         nightsTotal += getBookingNights(b);
       }
 
-      let capacity = Number(
-        listing.capacity ?? listing.seats ?? 0,
-      );
+      let capacity = Number(listing.capacity ?? listing.seats ?? 0);
       if (!Number.isFinite(capacity) || capacity < 0) capacity = 0;
 
-      const occupancy =
-        days > 0 ? Math.min(1, nightsTotal / days) : 0;
+      const occupancy = days > 0 ? Math.min(1, nightsTotal / days) : 0;
 
       const cancelRate =
         workspaceBookings.length > 0 ? cancelledBookingsList.length / workspaceBookings.length : 0;
@@ -158,9 +153,23 @@ exports.getWorkspacePerformance = async function getWorkspacePerformance(req, re
         ratingCount += 1;
       }
 
+      const rawName = (listing.title || listing.name || "").trim();
+      let displayName = rawName;
+
+      if (
+        !displayName ||
+        /^untitled workspace$/i.test(displayName) ||
+        /^untitled$/i.test(displayName)
+      ) {
+        displayName =
+          listing.venue ||
+          listing.address ||
+          "Untitled workspace";
+      }
+
       rowData.push({
         id: lid,
-        name: listing.title || listing.name || "Untitled workspace",
+        name: displayName,
         brand: listing.brand || "Unknown",
         branch: listing.branch || "Unknown",
         type: listing.type || listing.category || listing.scope || "Workspace",
