@@ -1,4 +1,4 @@
-// src/admins/routes/index.routes.js
+// src/admins/routes/index.js
 const express = require("express");
 const router = express.Router();
 
@@ -26,12 +26,16 @@ router.post("/logout", requireAuth, requireAdmin, auth.logout);
 // ========== dashboard stats ==========
 router.get("/dashboard", requireAuth, requireAdmin, dashboard.getDashboard);
 
-// ========== payments (mounted from its own routes file) ==========
+// ========== payments ==========
 router.use("/", require("./payments.routes"));
 
-// ========== listings (MongoDB) ==========
+// ========== listings ==========
 router.use("/listings", require("./listings.routes"));
 
+// ========== users ==========
+router.use("/users", require("./users.routes"));
+
+// ========== healthcheck ==========
 router.get("/_ping", (_req, res) => res.json({ status: "ok" }));
 
 module.exports = router;
