@@ -19,23 +19,19 @@ if (typeof dashboard?.getDashboard !== "function") {
 // ========== public ==========
 router.post("/login", auth.login);
 
-// ========== admin-only auth ==========
 router.get("/me", requireAuth, requireAdmin, auth.me);
 router.post("/logout", requireAuth, requireAdmin, auth.logout);
 
-// ========== dashboard stats ==========
 router.get("/dashboard", requireAuth, requireAdmin, dashboard.getDashboard);
 
-// ========== payments ==========
 router.use("/", require("./payments.routes"));
 
-// ========== listings ==========
 router.use("/listings", require("./listings.routes"));
 
-// ========== users ==========
 router.use("/users", require("./users.routes"));
 
-// ========== healthcheck ==========
+router.use("/analytics", require("./analytics.routes"));
+
 router.get("/_ping", (_req, res) => res.json({ status: "ok" }));
 
 module.exports = router;
