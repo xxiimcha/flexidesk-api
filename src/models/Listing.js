@@ -1,3 +1,4 @@
+// models/Listing.js
 const { Schema, model, Types } = require("mongoose");
 
 const Money = { type: Number, default: 0 };
@@ -6,7 +7,6 @@ const ListingSchema = new Schema(
   {
     owner: { type: Types.ObjectId, ref: "User", required: true, index: true },
 
-    // core fields (match your payload)
     category: String,
     scope: String,
     venue: String,
@@ -50,6 +50,13 @@ const ListingSchema = new Schema(
 
     photosMeta: { type: Array, default: [] },
     coverIndex: { type: Number, default: 0 },
+
+    customMessage: { type: String, default: "" },
+    guestNotes: { type: String, default: "" },
+    openingHoursWeekdays: { type: String, default: "" },
+    openingHoursWeekends: { type: String, default: "" },
+    checkinInstructions: { type: String, default: "" },
+    otherRules: { type: String, default: "" },
 
     status: { type: String, enum: ["draft", "active", "archived"], default: "draft", index: true }
   },

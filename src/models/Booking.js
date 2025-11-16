@@ -33,7 +33,7 @@ const BookingSchema = new mongoose.Schema(
     // Status lifecycle
     status: {
       type: String,
-      enum: ["pending_payment", "paid", "cancelled", "awaiting_payment"],
+      enum: ["pending_payment", "paid", "cancelled", "awaiting_payment","completed"],
       default: "pending_payment", // created -> pending_payment -> paid / cancelled
     },
 

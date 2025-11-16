@@ -1,11 +1,8 @@
+// controllers/owner/listings.controller.js
 const Listing = require("../../models/Listing");
 const User = require("../../models/User");
 const { signJwt } = require("../../utils/jwt");
 
-/**
- * POST /api/owner/listings
- * Allow client or owner to create. If user is client, auto-upgrade to owner and return a fresh token.
- */
 exports.create = async (req, res) => {
   try {
     const user = await User.findById(req.user.uid);
@@ -21,7 +18,7 @@ exports.create = async (req, res) => {
     const listing = await Listing.create({
       owner: user._id,
       ...req.body,
-      status: "draft", // default on create
+      status: "draft",
     });
 
     res.json({
@@ -33,10 +30,6 @@ exports.create = async (req, res) => {
   }
 };
 
-/**
- * GET /api/owner/listings/mine?status=&limit=&cursor=
- * List current user’s listings with optional status filter.
- */
 exports.listMine = async (req, res) => {
   try {
     const { status, limit = 12, cursor } = req.query;
@@ -60,10 +53,6 @@ exports.listMine = async (req, res) => {
   }
 };
 
-/**
- * GET /api/owner/listings/:id
- * Get one listing belonging to current owner.
- */
 exports.getById = async (req, res) => {
   try {
     const doc = await Listing.findOne({ _id: req.params.id, owner: req.user.uid }).lean();
@@ -74,10 +63,6 @@ exports.getById = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/owner/listings/:id
- * Update editable listing fields.
- */
 exports.update = async (req, res) => {
   try {
     const fields = { ...req.body, updatedAt: new Date() };
@@ -97,9 +82,6 @@ exports.update = async (req, res) => {
   }
 };
 
-/**
- * PATCH /api/owner/listings/:id/status   body: { status: "draft" | "active" | "archived" }
- */
 exports.updateStatus = async (req, res) => {
   try {
     const { status } = req.body;
@@ -120,9 +102,6 @@ exports.updateStatus = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/owner/listings/:id
- */
 exports.remove = async (req, res) => {
   try {
     const doc = await Listing.findOneAndDelete({ _id: req.params.id, owner: req.user.uid }).lean();
