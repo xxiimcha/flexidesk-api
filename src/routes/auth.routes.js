@@ -4,6 +4,9 @@ const bcrypt = require("bcryptjs");
 const { signJwt } = require("../utils/jwt");
 const User = require("../models/User");
 
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCK_TIME_MS = 15 * 60 * 1000;
+
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).toLowerCase());
 }
@@ -59,13 +62,43 @@ router.post("/login", async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ message: "Email and password required" });
 
-    const user = await User.findOne({ email: String(email).toLowerCase() });
+    const normalizedEmail = String(email).toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
+
     if (!user)
       return res.status(400).json({ message: "Invalid credentials" });
 
+    const isLocked =
+      user.lockUntil && user.lockUntil instanceof Date && user.lockUntil > Date.now();
+
+    if (isLocked) {
+      return res
+        .status(429)
+        .json({ message: "Too many attempts. Try again later." });
+    }
+
     const ok = await bcrypt.compare(String(password), user.passwordHash);
-    if (!ok)
-      return res.status(400).json({ message: "Invalid credentials" });
+
+    if (!ok) {
+      user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
+
+      if (user.failedLoginAttempts >= MAX_LOGIN_ATTEMPTS) {
+        user.lockUntil = new Date(Date.now() + LOCK_TIME_MS);
+      }
+
+      await user.save();
+
+      const msg =
+        user.lockUntil && user.lockUntil > Date.now()
+          ? "Too many attempts. Try again later."
+          : "Invalid credentials";
+
+      return res.status(400).json({ message: msg });
+    }
+
+    user.failedLoginAttempts = 0;
+    user.lockUntil = null;
+    await user.save();
 
     const token = signJwt({
       uid: user.id,
