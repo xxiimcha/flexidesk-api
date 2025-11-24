@@ -33,7 +33,7 @@ async function listUsers(req, res) {
       .sort({ updatedAt: -1 })
       .skip((page - 1) * pageSize)
       .limit(pageSize)
-      .select("fullName email role verification updatedAt createdAt")
+      .select("fullName email role verification identityStatus updatedAt createdAt")
       .lean();
 
     const mapped = items.map((u) => ({
@@ -42,6 +42,7 @@ async function listUsers(req, res) {
       email: u.email || "",
       role: u.role || "client",
       verification: u.verification || {},
+      identityStatus: u.identityStatus || u.verification?.status || "pending",
       updatedAt: u.updatedAt || u.createdAt || null,
     }));
 
@@ -80,6 +81,9 @@ async function verifyUserId(req, res) {
       notes: note || user.verification?.notes || "",
       idUrl: user.verification?.idUrl || null,
     };
+
+    user.identityStatus = status;
+
     await user.save();
 
     await VerificationLog.create({

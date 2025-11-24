@@ -1,6 +1,6 @@
-const User = require("../../models/User");
-const ClientProfile = require("../../models/ClientProfile");
-const cloudinary = require("../../utils/cloudinary");
+const User = require("../models/User");
+const ClientProfile = require("../models/ClientProfile");
+const cloudinary = require("../utils/cloudinary");
 
 const DEFAULT_PREFS = {
   workspaceType: "any",
