@@ -8,7 +8,7 @@ const UserSchema = new Schema(
       required: true,
       unique: true,
       lowercase: true,
-      index: true
+      index: true,
     },
     passwordHash: { type: String, required: true },
 
@@ -16,42 +16,91 @@ const UserSchema = new Schema(
       type: String,
       enum: ["client", "owner", "admin"],
       default: "client",
-      index: true
+      index: true,
     },
 
     avatar: { type: String },
 
     failedLoginAttempts: {
       type: Number,
-      default: 0
+      default: 0,
     },
 
     lockUntil: {
       type: Date,
-      default: null
+      default: null,
     },
 
     emailVerified: {
       type: Boolean,
-      default: false
+      default: false,
     },
 
     emailVerificationCode: {
       type: String,
-      default: null
+      default: null,
     },
 
     emailVerificationExpires: {
       type: Date,
-      default: null
-    }
+      default: null,
+    },
+
+    identityStatus: {
+      type: String,
+      enum: ["unverified", "pending", "verified", "rejected"],
+      default: "unverified",
+      index: true,
+    },
+
+    identityType: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
+    identityNumberLast4: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
+    identityDocumentFrontUrl: {
+      type: String,
+      default: null,
+    },
+
+    identityDocumentBackUrl: {
+      type: String,
+      default: null,
+    },
+
+    identityVerifiedAt: {
+      type: Date,
+      default: null,
+    },
+
+    identityReviewedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
+    identityReviewNotes: {
+      type: String,
+      default: null,
+      trim: true,
+    },
   },
   { timestamps: true }
 );
 
-// virtual: check if account is currently locked
 UserSchema.virtual("isLocked").get(function () {
   return this.lockUntil && this.lockUntil > Date.now();
+});
+
+UserSchema.virtual("isIdentityVerified").get(function () {
+  return this.identityStatus === "verified";
 });
 
 module.exports = model("User", UserSchema);
