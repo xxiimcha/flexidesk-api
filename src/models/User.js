@@ -29,6 +29,21 @@ const UserSchema = new Schema(
     lockUntil: {
       type: Date,
       default: null
+    },
+
+    emailVerified: {
+      type: Boolean,
+      default: false
+    },
+
+    emailVerificationCode: {
+      type: String,
+      default: null
+    },
+
+    emailVerificationExpires: {
+      type: Date,
+      default: null
     }
   },
   { timestamps: true }
