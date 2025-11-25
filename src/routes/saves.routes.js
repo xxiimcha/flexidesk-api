@@ -1,9 +1,12 @@
 const router = require("express").Router();
-const requireAuth = require("../middleware/auth");
-const saves = require("../controllers/saves.controller");
+const requireUser = require("../middleware/requireUser");
+const ctrl = require("../controllers/saves.controller");
 
-router.get("/users/me/saves/:listingId", requireAuth, saves.check);
-router.put("/users/me/saves/:listingId", requireAuth, saves.save);
-router.delete("/users/me/saves/:listingId", requireAuth, saves.unsave);
+router.use(requireUser);
+
+router.get("/", ctrl.list);
+router.get("/saves/:listingId/check", ctrl.check);
+router.post("/saves/:listingId", ctrl.save);
+router.delete("/saves/:listingId", ctrl.unsave);
 
 module.exports = router;
