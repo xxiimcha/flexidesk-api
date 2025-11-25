@@ -58,7 +58,8 @@ const ListingSchema = new Schema(
     checkinInstructions: { type: String, default: "" },
     otherRules: { type: String, default: "" },
 
-    status: { type: String, enum: ["draft", "active", "archived"], default: "draft", index: true }
+    status: { type: String, enum: ["draft", "active", "archived"], default: "draft", index: true },
+    isFeatured: { type: Boolean, default: false, index: true },
   },
   { timestamps: true }
 );

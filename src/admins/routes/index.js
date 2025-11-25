@@ -26,7 +26,8 @@ router.use("/listings", require("./listings.routes"));
 router.use("/users", require("./users.routes"));
 router.use("/analytics", require("./analytics.routes"));
 router.use("/cases", require("./cases.routes"));
-router.use("/reports", require("./reports.route")); // <- fixed
+router.use("/reports", require("./reports.route"));
+router.use("/bookings", require("./bookings.routes"));
 
 router.get("/_ping", (_req, res) => res.json({ status: "ok" }));
 

@@ -8,6 +8,7 @@ router.get("/:id", requireAuth, requireAdmin, ctrl.getOne);
 router.post("/", requireAuth, requireAdmin, ctrl.create);
 router.put("/:id", requireAuth, requireAdmin, ctrl.update);
 router.patch("/:id/status", requireAuth, requireAdmin, ctrl.updateStatus);
+router.patch("/:id/featured", requireAuth, requireAdmin, ctrl.updateFeatured);
 router.delete("/:id", requireAuth, requireAdmin, ctrl.remove);
 
 router.post("/:id/approve", usersCtrl.approveListing);

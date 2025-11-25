@@ -4,7 +4,13 @@ const User = require("../../models/User");
 
 function pickName(u) {
   if (!u) return null;
-  return u.fullName || u.name || [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || String(u._id);
+  return (
+    u.fullName ||
+    u.name ||
+    [u.firstName, u.lastName].filter(Boolean).join(" ") ||
+    u.email ||
+    String(u._id)
+  );
 }
 
 function dbToApi(r, ownerDoc) {
@@ -25,6 +31,7 @@ function dbToApi(r, ownerDoc) {
     shortDesc: r.shortDesc,
     longDesc: r.longDesc,
     amenities: r.amenities || {},
+    isFeatured: !!r.isFeatured,
     owner: r.owner
       ? {
           id: String(r.owner),
@@ -37,6 +44,7 @@ function dbToApi(r, ownerDoc) {
 
 function apiToDb(src) {
   const out = {};
+
   if (src.name !== undefined) out.venue = String(src.name).trim();
   if (src.type !== undefined) out.category = String(src.type).trim();
   if (src.status !== undefined) out.status = String(src.status).trim();
@@ -45,10 +53,12 @@ function apiToDb(src) {
     const n = Number(src.priceHourly);
     out.priceSeatHour = Number.isFinite(n) ? n : null;
   }
+
   if (src.capacity !== undefined) {
     const n = Number(src.capacity);
     out.seats = Number.isFinite(n) ? n : 0;
   }
+
   if (src.location !== undefined) out.city = String(src.location).trim();
 
   if (src.address !== undefined) {
@@ -65,18 +75,36 @@ function apiToDb(src) {
 
   if (src.amenities !== undefined) {
     let list = [];
-    if (Array.isArray(src.amenities)) list = src.amenities.map((s) => String(s).trim()).filter(Boolean);
-    else if (typeof src.amenities === "string") list = src.amenities.split(",").map((s) => s.trim()).filter(Boolean);
+    if (Array.isArray(src.amenities))
+      list = src.amenities.map((s) => String(s).trim()).filter(Boolean);
+    else if (typeof src.amenities === "string")
+      list = src.amenities
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
     const known = ["wifi", "ac", "power", "coffee", "whiteboard", "projector"];
     out.amenities = {};
-    known.forEach((k) => { out.amenities[k] = list.includes(k); });
+    known.forEach((k) => {
+      out.amenities[k] = list.includes(k);
+    });
   }
+
+  if (src.isFeatured !== undefined) {
+    out.isFeatured = !!src.isFeatured;
+  }
+
   return out;
 }
 
 function parseSort(sortParam) {
   const fallback = { updatedAt: -1, _id: -1 };
-  const map = { updatedAt: "updatedAt", priceHourly: "priceSeatHour", capacity: "seats", name: "venue" };
+  const map = {
+    updatedAt: "updatedAt",
+    priceHourly: "priceSeatHour",
+    capacity: "seats",
+    name: "venue",
+  };
   if (!sortParam) return fallback;
   const [field, dir] = String(sortParam).split("_");
   const dbField = map[field];
@@ -94,6 +122,8 @@ function buildFilter(q) {
     const rx = new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     filter.$or = [{ venue: rx }, { address: rx }, { city: rx }];
   }
+  if (q.featured === "featured") filter.isFeatured = true;
+  if (q.featured === "not_featured") filter.isFeatured = { $ne: true };
   return filter;
 }
 
@@ -118,13 +148,20 @@ exports.list = async (req, res, next) => {
       if (cursorDoc) {
         const fieldVal = cursorDoc[sortField];
         if (sortField === "_id") {
-          find._id = sortDir === 1 ? { $gt: cursorDoc._id } : { $lt: cursorDoc._id };
+          find._id =
+            sortDir === 1 ? { $gt: cursorDoc._id } : { $lt: cursorDoc._id };
         } else {
           find.$or = [
-            { [sortField]: sortDir === 1 ? { $gt: fieldVal } : { $lt: fieldVal } },
+            {
+              [sortField]:
+                sortDir === 1 ? { $gt: fieldVal } : { $lt: fieldVal },
+            },
             {
               [sortField]: fieldVal,
-              _id: sortDir === 1 ? { $gt: cursorDoc._id } : { $lt: cursorDoc._id },
+              _id:
+                sortDir === 1
+                  ? { $gt: cursorDoc._id }
+                  : { $lt: cursorDoc._id },
             },
           ];
         }
@@ -185,11 +222,11 @@ exports.getOne = async (req, res, next) => {
   }
 };
 
-
 exports.create = async (req, res, next) => {
   try {
     const payload = apiToDb(req.body || {});
-    if (!payload.venue) return res.status(400).json({ error: "Name (venue) is required" });
+    if (!payload.venue)
+      return res.status(400).json({ error: "Name (venue) is required" });
     const doc = await Listing.create(payload);
     res.status(201).json({ id: String(doc._id) });
   } catch (err) {
@@ -200,7 +237,8 @@ exports.create = async (req, res, next) => {
 exports.update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ error: "Invalid id" });
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
     const payload = apiToDb(req.body || {});
     await Listing.findByIdAndUpdate(id, payload, { runValidators: true });
     res.json({ ok: true });
@@ -213,10 +251,37 @@ exports.updateStatus = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { status } = req.body || {};
-    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ error: "Invalid id" });
-    if (!["active", "draft", "archived"].includes(status)) return res.status(400).json({ error: "Invalid status" });
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+    if (!["active", "draft", "archived"].includes(status))
+      return res.status(400).json({ error: "Invalid status" });
     await Listing.findByIdAndUpdate(id, { status }, { runValidators: true });
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.updateFeatured = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { featured } = req.body || {};
+
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+
+    if (typeof featured !== "boolean")
+      return res.status(400).json({ error: "featured must be boolean" });
+
+    const doc = await Listing.findByIdAndUpdate(
+      id,
+      { isFeatured: featured },
+      { new: true, runValidators: true }
+    ).lean();
+
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    return res.json({ ok: true, isFeatured: !!doc.isFeatured });
   } catch (err) {
     next(err);
   }
@@ -225,7 +290,8 @@ exports.updateStatus = async (req, res, next) => {
 exports.remove = async (req, res, next) => {
   try {
     const { id } = req.params;
-    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ error: "Invalid id" });
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
     await Listing.findByIdAndDelete(id);
     res.json({ ok: true });
   } catch (err) {
