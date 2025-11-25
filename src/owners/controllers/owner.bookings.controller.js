@@ -2,7 +2,7 @@
 const Booking = require("../../models/Booking");
 const Listing = require("../../models/Listing");
 
-const uid = (req) => req.user?.uid || null;
+const uid = (req) => req.user?._id || req.user?.id || req.user?.uid || null;
 
 function parseLimit(raw, def = 12, max = 100) {
   const n = Number(raw);
@@ -32,7 +32,7 @@ exports.getOwnerBookingsMine = async function getOwnerBookingsMine(req, res) {
       return res.json({ items: [], nextCursor: null });
     }
 
-    const filter = { listing: { $in: listingIds } };
+    const filter = { listingId: { $in: listingIds } };
     if (status && status !== "all") filter.status = status;
 
     const docs = await Booking.find(filter)
@@ -40,11 +40,11 @@ exports.getOwnerBookingsMine = async function getOwnerBookingsMine(req, res) {
       .skip(skip)
       .limit(limit + 1)
       .populate({
-        path: "listing",
+        path: "listingId",
         select: "shortDesc title category scope city region country currency",
       })
       .populate({
-        path: "user",
+        path: "userId",
         select: "fullName name email",
       })
       .exec();
@@ -56,6 +56,8 @@ exports.getOwnerBookingsMine = async function getOwnerBookingsMine(req, res) {
     const normalized = items.map((b) => {
       const obj = b.toObject ? b.toObject() : b;
       obj.id = obj._id;
+      if (obj.listingId && obj.listingId._id) obj.listing = obj.listingId;
+      if (obj.userId && obj.userId._id) obj.user = obj.userId;
       return obj;
     });
 
@@ -71,8 +73,6 @@ exports.getOwnerBookingsMine = async function getOwnerBookingsMine(req, res) {
   }
 };
 
-// GET /owner/bookings/:id
-// Used by QR scan to show booking details
 exports.getOwnerBookingOne = async function getOwnerBookingOne(req, res) {
   try {
     const ownerId = uid(req);
@@ -84,12 +84,12 @@ exports.getOwnerBookingOne = async function getOwnerBookingOne(req, res) {
 
     const booking = await Booking.findById(id)
       .populate({
-        path: "listing",
+        path: "listingId",
         select:
           "title shortDesc category scope city region country currency owner",
       })
       .populate({
-        path: "user",
+        path: "userId",
         select: "fullName name email",
       })
       .exec();
@@ -98,12 +98,17 @@ exports.getOwnerBookingOne = async function getOwnerBookingOne(req, res) {
       return res.status(404).json({ message: "Booking not found" });
     }
 
-    if (!booking.listing || String(booking.listing.owner) !== String(ownerId)) {
+    if (
+      !booking.listingId ||
+      String(booking.listingId.owner) !== String(ownerId)
+    ) {
       return res.status(403).json({ message: "Forbidden" });
     }
 
     const obj = booking.toObject ? booking.toObject() : booking;
     obj.id = obj._id;
+    if (obj.listingId && obj.listingId._id) obj.listing = obj.listingId;
+    if (obj.userId && obj.userId._id) obj.user = obj.userId;
 
     return res.json(obj);
   } catch (err) {
@@ -112,8 +117,6 @@ exports.getOwnerBookingOne = async function getOwnerBookingOne(req, res) {
   }
 };
 
-// POST /owner/bookings/:id/complete
-// Called when host confirms check-in after QR scan
 exports.completeOwnerBooking = async function completeOwnerBooking(req, res) {
   try {
     const ownerId = uid(req);
@@ -125,7 +128,7 @@ exports.completeOwnerBooking = async function completeOwnerBooking(req, res) {
 
     const booking = await Booking.findById(id)
       .populate({
-        path: "listing",
+        path: "listingId",
         select: "owner",
       })
       .exec();
@@ -134,7 +137,10 @@ exports.completeOwnerBooking = async function completeOwnerBooking(req, res) {
       return res.status(404).json({ message: "Booking not found" });
     }
 
-    if (!booking.listing || String(booking.listing.owner) !== String(ownerId)) {
+    if (
+      !booking.listingId ||
+      String(booking.listingId.owner) !== String(ownerId)
+    ) {
       return res.status(403).json({ message: "Forbidden" });
     }
 
@@ -149,6 +155,7 @@ exports.completeOwnerBooking = async function completeOwnerBooking(req, res) {
 
     const obj = booking.toObject ? booking.toObject() : booking;
     obj.id = obj._id;
+    if (obj.listingId && obj.listingId._id) obj.listing = obj.listingId;
 
     return res.json({
       message: "Booking marked as completed",
