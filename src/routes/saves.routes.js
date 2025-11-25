@@ -1,12 +1,20 @@
+// routes/saves.routes.js
 const router = require("express").Router();
 const requireUser = require("../middleware/requireUser");
 const ctrl = require("../controllers/saves.controller");
 
 router.use(requireUser);
 
+// GET /api/saves
 router.get("/", ctrl.list);
-router.get("/saves/:listingId/check", ctrl.check);
-router.post("/saves/:listingId", ctrl.save);
-router.delete("/saves/:listingId", ctrl.unsave);
+
+// GET /api/saves/:listingId  -> { saved: boolean }
+router.get("/:listingId", ctrl.check);
+
+// PUT /api/saves/:listingId  -> save
+router.put("/:listingId", ctrl.save);
+
+// DELETE /api/saves/:listingId  -> unsave
+router.delete("/:listingId", ctrl.unsave);
 
 module.exports = router;
