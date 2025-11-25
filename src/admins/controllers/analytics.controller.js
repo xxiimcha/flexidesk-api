@@ -1,5 +1,44 @@
+// src/admins/controllers/analytics.controller.js
 const Booking = require("../../models/Booking");
 const Listing = require("../../models/Listing");
+
+function formatPeso(amount) {
+  const n = Number(amount || 0);
+  return n.toLocaleString("en-PH", {
+    style: "currency",
+    currency: "PHP",
+    maximumFractionDigits: 0,
+  });
+}
+
+function resolveDaysFromQuery(query) {
+  const { range, datePreset = "last30" } = query;
+  if (range === "7d") return 7;
+  if (range === "30d") return 30;
+  if (range === "90d") return 90;
+  if (datePreset === "last7") return 7;
+  if (datePreset === "last90") return 90;
+  return 30;
+}
+
+function weekdayShortLabel(date) {
+  const d = new Date(date);
+  const labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  return labels[d.getDay()];
+}
+
+function weekdayLongLabel(index) {
+  const labels = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+  ];
+  return labels[index] || "Friday";
+}
 
 async function getIncomeAnalytics(req, res) {
   try {
@@ -368,6 +407,308 @@ async function getOccupancyReport(req, res) {
   }
 }
 
+async function getAnalyticsOverview(req, res) {
+  try {
+    const days = resolveDaysFromQuery(req.query);
+
+    const now = new Date();
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - (days - 1));
+    const end = new Date(now);
+
+    const bookings = await Booking.find({
+      createdAt: { $gte: start, $lte: end },
+      status: { $in: ["paid", "confirmed", "completed"] },
+    })
+      .populate({
+        path: "listingId",
+        model: "Listing",
+        select: "venue city brand category scope status",
+      })
+      .lean();
+
+    const getListingCategory = (b) => b?.listingId?.category || "Workspace";
+    const getGross = (b) =>
+      Number(b.amount) || Number(b.pricingSnapshot?.total) || 0;
+    const getClientId = (b) =>
+      b.clientId ? String(b.clientId) : b.userId ? String(b.userId) : "";
+
+    const bookingsMapByDay = new Map();
+    const bookingsByTypeMap = new Map();
+    const activeUserSet = new Set();
+
+    let totalRevenue = 0;
+
+    bookings.forEach((b) => {
+      const created = b.createdAt ? new Date(b.createdAt) : new Date();
+      const key = created.toISOString().slice(0, 10);
+      const gross = getGross(b);
+      const category = getListingCategory(b);
+      const clientId = getClientId(b);
+
+      totalRevenue += gross;
+
+      const count = bookingsMapByDay.get(key) || 0;
+      bookingsMapByDay.set(key, count + 1);
+
+      bookingsByTypeMap.set(
+        category,
+        (bookingsByTypeMap.get(category) || 0) + 1
+      );
+
+      if (clientId) {
+        activeUserSet.add(clientId);
+      }
+    });
+
+    const perDay = [];
+    let maxDailyBookings = 0;
+    for (let i = 0; i < days; i++) {
+      const day = new Date(start);
+      day.setDate(start.getDate() + i);
+      const key = day.toISOString().slice(0, 10);
+      const count = bookingsMapByDay.get(key) || 0;
+      if (count > maxDailyBookings) maxDailyBookings = count;
+      perDay.push({ key, date: day, count });
+    }
+
+    if (maxDailyBookings === 0) maxDailyBookings = 1;
+
+    const occupancySeries = perDay.map((row) => {
+      const occupancy = Math.round((row.count / maxDailyBookings) * 100);
+      return {
+        label: weekdayShortLabel(row.date),
+        occupancy,
+        forecast: occupancy,
+      };
+    });
+
+    const avgOccupancy =
+      occupancySeries.length > 0
+        ? Math.round(
+            occupancySeries.reduce((sum, r) => sum + r.occupancy, 0) /
+              occupancySeries.length
+          )
+        : 0;
+
+    const bookingsByType =
+      bookingsByTypeMap.size > 0
+        ? Array.from(bookingsByTypeMap.entries()).map(([type, bookings]) => ({
+            type,
+            bookings,
+          }))
+        : [
+            { type: "Hot desk", bookings: 320 },
+            { type: "Meeting room", bookings: 190 },
+            { type: "Private office", bookings: 120 },
+          ];
+
+    res.json({
+      permissionError: false,
+      avgOccupancy: `${avgOccupancy}%`,
+      totalBookings: bookings.length,
+      totalRevenue,
+      totalRevenueFormatted: formatPeso(totalRevenue),
+      activeUsers: activeUserSet.size,
+      occupancySeries,
+      bookingsByType,
+    });
+  } catch (err) {
+    console.error("getAnalyticsOverview error", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+}
+
+async function getAnalyticsForecast(req, res) {
+  try {
+    const days = resolveDaysFromQuery(req.query);
+
+    const now = new Date();
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - (days - 1));
+    const end = new Date(now);
+
+    const bookings = await Booking.find({
+      createdAt: { $gte: start, $lte: end },
+      status: { $in: ["paid", "confirmed", "completed"] },
+    }).lean();
+
+    const msPerHour = 60 * 60 * 1000;
+    const rangeHours = Math.max(1, (end - start) / msPerHour);
+
+    const bookingsMapByDay = new Map();
+    const perHour = new Array(24).fill(0).map(() => ({ total: 0, count: 0 }));
+
+    bookings.forEach((b) => {
+      const created = b.createdAt ? new Date(b.createdAt) : new Date();
+      if (created < start || created > end) return;
+
+      const key = created.toISOString().slice(0, 10);
+      bookingsMapByDay.set(key, (bookingsMapByDay.get(key) || 0) + 1);
+
+      const hour = created.getHours();
+      if (hour >= 0 && hour < 24) {
+        perHour[hour].total += 1 / rangeHours;
+        perHour[hour].count += 1;
+      }
+    });
+
+    const perDay = [];
+    let maxDailyBookings = 0;
+    const perDayForWeekday = [];
+
+    for (let i = 0; i < days; i++) {
+      const day = new Date(start);
+      day.setDate(start.getDate() + i);
+      const key = day.toISOString().slice(0, 10);
+      const count = bookingsMapByDay.get(key) || 0;
+
+      perDay.push({ date: day, count });
+
+      if (count > maxDailyBookings) maxDailyBookings = count;
+
+      const d = new Date(day);
+      perDayForWeekday.push({ dayIndex: d.getDay(), count });
+    }
+
+    if (maxDailyBookings === 0) maxDailyBookings = 1;
+
+    const occupancySeries = perDay.map((row) => {
+      const occupancy = Math.round((row.count / maxDailyBookings) * 100);
+      return {
+        label: weekdayShortLabel(row.date),
+        occupancy,
+        forecast: occupancy,
+      };
+    });
+
+    const lastFew = perDay.slice(-Math.min(5, perDay.length));
+    let projectedOccupancy = "86%";
+    if (lastFew.length) {
+      const avgRecent =
+        lastFew.reduce((sum, r) => sum + r.count, 0) / lastFew.length;
+      const pct = Math.round((avgRecent / maxDailyBookings) * 100);
+      projectedOccupancy = `${pct}%`;
+    }
+
+    const revenueAgg = await Booking.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: start, $lte: end },
+          status: { $in: ["paid", "confirmed", "completed"] },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: { $ifNull: ["$amount", "$pricingSnapshot.total"] } },
+        },
+      },
+    ]);
+
+    const totalRevenue = revenueAgg[0]?.total || 0;
+    const projectedRevenue = totalRevenue * 1.08;
+
+    const weekdayStats = perDayForWeekday.reduce((acc, row) => {
+      if (!acc[row.dayIndex]) {
+        acc[row.dayIndex] = { sum: 0, count: 0 };
+      }
+      acc[row.dayIndex].sum += row.count;
+      acc[row.dayIndex].count += 1;
+      return acc;
+    }, {});
+
+    let peakDayIndex = 4;
+    let peakDayScore = -1;
+
+    Object.keys(weekdayStats).forEach((key) => {
+      const idx = Number(key);
+      const s = weekdayStats[idx];
+      const avg = s.sum / s.count;
+      if (avg > peakDayScore) {
+        peakDayScore = avg;
+        peakDayIndex = idx;
+      }
+    });
+
+    const nextPeakDay = weekdayLongLabel(peakDayIndex);
+
+    const demandBuckets = {
+      Morning: 0,
+      Afternoon: 0,
+      Evening: 0,
+    };
+
+    perHour.forEach((h, hourIndex) => {
+      const count = h.count;
+      if (count <= 0) return;
+      if (hourIndex >= 6 && hourIndex < 12) {
+        demandBuckets.Morning += count;
+      } else if (hourIndex >= 12 && hourIndex < 18) {
+        demandBuckets.Afternoon += count;
+      } else {
+        demandBuckets.Evening += count;
+      }
+    });
+
+    const demandCycles = [
+      { label: "Morning", value: demandBuckets.Morning },
+      { label: "Afternoon", value: demandBuckets.Afternoon },
+      { label: "Evening", value: demandBuckets.Evening },
+    ];
+
+    const maxDemand = demandCycles.reduce(
+      (max, row) => (row.value > max ? row.value : max),
+      0
+    );
+    const minDemand = demandCycles.reduce(
+      (min, row) =>
+        row.value < min ? row.value : (min === 0 ? row.value : min),
+      maxDemand || 0
+    );
+
+    const highRiskPeriods = [];
+
+    const overBucket = demandCycles.find((d) => d.value === maxDemand);
+    const underBucket = demandCycles.find((d) => d.value === minDemand);
+
+    if (overBucket) {
+      highRiskPeriods.push({
+        label: "Over-capacity risk",
+        description: nextPeakDay + ", 3:00 PM – 6:00 PM",
+        level: "High",
+        kind: "over",
+      });
+    }
+
+    if (underBucket) {
+      highRiskPeriods.push({
+        label: "Under-utilization risk",
+        description: "Lowest demand window based on recent data",
+        level: "Medium",
+        kind: "under",
+      });
+    }
+
+    res.json({
+      permissionError: false,
+      nextPeakDay,
+      nextPeakHour: "3:00 PM – 6:00 PM",
+      projectedOccupancy,
+      projectedRevenue,
+      projectedRevenueFormatted: formatPeso(projectedRevenue),
+      demandCycles,
+      highRiskPeriods,
+      occupancySeries,
+    });
+  } catch (err) {
+    console.error("getAnalyticsForecast error", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+}
+
 function clamp01(n) {
   if (Number.isNaN(n)) return 0;
   return Math.max(0, Math.min(1, Number(n)));
@@ -376,4 +717,6 @@ function clamp01(n) {
 module.exports = {
   getIncomeAnalytics,
   getOccupancyReport,
+  getAnalyticsOverview,
+  getAnalyticsForecast,
 };
