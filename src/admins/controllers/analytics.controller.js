@@ -37,7 +37,7 @@ function weekdayLongLabel(index) {
     "Friday",
     "Saturday",
   ];
-  return labels[index] || "Friday";
+  return labels[index] || "";
 }
 
 async function getIncomeAnalytics(req, res) {
@@ -498,11 +498,7 @@ async function getAnalyticsOverview(req, res) {
             type,
             bookings,
           }))
-        : [
-            { type: "Hot desk", bookings: 320 },
-            { type: "Meeting room", bookings: 190 },
-            { type: "Private office", bookings: 120 },
-          ];
+        : [];
 
     res.json({
       permissionError: false,
@@ -585,8 +581,8 @@ async function getAnalyticsForecast(req, res) {
     });
 
     const lastFew = perDay.slice(-Math.min(5, perDay.length));
-    let projectedOccupancy = "86%";
-    if (lastFew.length) {
+    let projectedOccupancy = "0%";
+    if (lastFew.length && maxDailyBookings > 0) {
       const avgRecent =
         lastFew.reduce((sum, r) => sum + r.count, 0) / lastFew.length;
       const pct = Math.round((avgRecent / maxDailyBookings) * 100);
@@ -609,7 +605,8 @@ async function getAnalyticsForecast(req, res) {
     ]);
 
     const totalRevenue = revenueAgg[0]?.total || 0;
-    const projectedRevenue = totalRevenue * 1.08;
+    const projectedRevenue =
+      totalRevenue > 0 ? totalRevenue * 1.08 : 0;
 
     const weekdayStats = perDayForWeekday.reduce((acc, row) => {
       if (!acc[row.dayIndex]) {
@@ -620,7 +617,7 @@ async function getAnalyticsForecast(req, res) {
       return acc;
     }, {});
 
-    let peakDayIndex = 4;
+    let nextPeakDay = "";
     let peakDayScore = -1;
 
     Object.keys(weekdayStats).forEach((key) => {
@@ -629,11 +626,9 @@ async function getAnalyticsForecast(req, res) {
       const avg = s.sum / s.count;
       if (avg > peakDayScore) {
         peakDayScore = avg;
-        peakDayIndex = idx;
+        nextPeakDay = weekdayLongLabel(idx);
       }
     });
-
-    const nextPeakDay = weekdayLongLabel(peakDayIndex);
 
     const demandBuckets = {
       Morning: 0,
@@ -671,31 +666,36 @@ async function getAnalyticsForecast(req, res) {
 
     const highRiskPeriods = [];
 
-    const overBucket = demandCycles.find((d) => d.value === maxDemand);
-    const underBucket = demandCycles.find((d) => d.value === minDemand);
-
-    if (overBucket) {
-      highRiskPeriods.push({
-        label: "Over-capacity risk",
-        description: nextPeakDay + ", 3:00 PM – 6:00 PM",
-        level: "High",
-        kind: "over",
-      });
+    if (maxDemand > 0) {
+      const overBucket = demandCycles.find((d) => d.value === maxDemand);
+      if (overBucket) {
+        highRiskPeriods.push({
+          label: "Over-capacity risk",
+          description: nextPeakDay
+            ? nextPeakDay + ", 3:00 PM – 6:00 PM"
+            : "Busiest demand window based on recent data",
+          level: "High",
+          kind: "over",
+        });
+      }
     }
 
-    if (underBucket) {
-      highRiskPeriods.push({
-        label: "Under-utilization risk",
-        description: "Lowest demand window based on recent data",
-        level: "Medium",
-        kind: "under",
-      });
+    if (minDemand > 0) {
+      const underBucket = demandCycles.find((d) => d.value === minDemand);
+      if (underBucket) {
+        highRiskPeriods.push({
+          label: "Under-utilization risk",
+          description: "Lowest demand window based on recent data",
+          level: "Medium",
+          kind: "under",
+        });
+      }
     }
 
     res.json({
       permissionError: false,
       nextPeakDay,
-      nextPeakHour: "3:00 PM – 6:00 PM",
+      nextPeakHour: nextPeakDay ? "3:00 PM – 6:00 PM" : "",
       projectedOccupancy,
       projectedRevenue,
       projectedRevenueFormatted: formatPeso(projectedRevenue),
