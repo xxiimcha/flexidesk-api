@@ -264,8 +264,7 @@ async function getOccupancyReport(req, res) {
     const bookings = await Booking.find({
       listingId: { $in: listingIds },
       status: { $in: ["paid", "confirmed", "completed"] },
-      start: { $lt: end },
-      end: { $gt: start },
+      createdAt: { $gte: start, $lte: end },
     }).lean();
 
     const perListing = new Map();
@@ -307,9 +306,33 @@ async function getOccupancyReport(req, res) {
       const ls = perListing.get(lid);
       if (!ls) return;
 
-      const startClipped = new Date(Math.max(b.start, start));
-      const endClipped = new Date(Math.min(b.end, end));
+      let bookingStart;
+      let bookingEnd;
+
+      if (b.start && b.end) {
+        bookingStart = new Date(b.start);
+        bookingEnd = new Date(b.end);
+      } else if (b.startDate && b.endDate) {
+        const checkIn = b.checkInTime || "09:00";
+        const checkOut = b.checkOutTime || "18:00";
+        bookingStart = new Date(`${b.startDate}T${checkIn}`);
+        bookingEnd = new Date(`${b.endDate}T${checkOut}`);
+      } else {
+        const base = b.createdAt ? new Date(b.createdAt) : new Date();
+        const hours = b.totalHours || 1;
+        bookingStart = base;
+        bookingEnd = new Date(base.getTime() + hours * msPerHour);
+      }
+
+      const startClipped = new Date(
+        Math.max(bookingStart.getTime(), start.getTime())
+      );
+      const endClipped = new Date(
+        Math.min(bookingEnd.getTime(), end.getTime())
+      );
       const hours = Math.max(0, (endClipped - startClipped) / msPerHour);
+      if (hours <= 0) return;
+
       ls.bookedHours += hours;
 
       if (!Number.isNaN(startClipped.getTime())) {
@@ -365,13 +388,16 @@ async function getOccupancyReport(req, res) {
     }));
 
     let peakHourLabel = "";
-    let peakRate = -1;
+    let peakRate = 0;
     byHour.forEach((h) => {
       if (h.rate > peakRate) {
         peakRate = h.rate;
         peakHourLabel = h.hour;
       }
     });
+    if (peakRate === 0) {
+      peakHourLabel = "";
+    }
 
     const peakDay = "";
 
@@ -605,8 +631,7 @@ async function getAnalyticsForecast(req, res) {
     ]);
 
     const totalRevenue = revenueAgg[0]?.total || 0;
-    const projectedRevenue =
-      totalRevenue > 0 ? totalRevenue * 1.08 : 0;
+    const projectedRevenue = totalRevenue > 0 ? totalRevenue * 1.08 : 0;
 
     const weekdayStats = perDayForWeekday.reduce((acc, row) => {
       if (!acc[row.dayIndex]) {
@@ -660,7 +685,7 @@ async function getAnalyticsForecast(req, res) {
     );
     const minDemand = demandCycles.reduce(
       (min, row) =>
-        row.value < min ? row.value : (min === 0 ? row.value : min),
+        row.value < min ? row.value : min === 0 ? row.value : min,
       maxDemand || 0
     );
 
