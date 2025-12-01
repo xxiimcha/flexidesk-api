@@ -1,22 +1,28 @@
-const { v2: cloudinary } = require("cloudinary");
-const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const multer = require("multer");
+const cloudinary = require("../utils/cloudinary");
+const multerStorageCloudinary = require("multer-storage-cloudinary");
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+const CloudinaryStorage =
+  multerStorageCloudinary.CloudinaryStorage ||
+  multerStorageCloudinary.default ||
+  multerStorageCloudinary;
 
 const avatarStorage = new CloudinaryStorage({
   cloudinary,
   params: {
     folder: "flexidesk/avatars",
     allowed_formats: ["jpg", "jpeg", "png", "webp"],
+    transformation: [{ width: 512, height: 512, crop: "limit" }],
   },
 });
 
-const uploadAvatar = multer({ storage: avatarStorage });
+const identityStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: "flexidesk/identity",
+    allowed_formats: ["jpg", "jpeg", "png", "pdf"],
+  },
+});
 
-module.exports = uploadAvatar;
-module.exports.uploadAvatar = uploadAvatar;
+exports.uploadAvatar = multer({ storage: avatarStorage });
+exports.uploadIdentity = multer({ storage: identityStorage });
