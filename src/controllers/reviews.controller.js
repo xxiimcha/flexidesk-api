@@ -17,15 +17,25 @@ const recalcListingRating = async (listingId) => {
 
   if (!stats) {
     await Listing.findByIdAndUpdate(listingId, {
-      $set: { ratingAvg: 0, ratingCount: 0 },
+      $set: {
+        ratingAvg: 0,
+        ratingCount: 0,
+        rating: 0,
+        reviewsCount: 0,
+      },
     }).catch(() => {});
     return;
   }
 
+  const avg = Math.round(stats.avgRating * 10) / 10;
+  const count = stats.count;
+
   await Listing.findByIdAndUpdate(listingId, {
     $set: {
-      ratingAvg: Math.round(stats.avgRating * 10) / 10,
-      ratingCount: stats.count,
+      ratingAvg: avg,
+      ratingCount: count,
+      rating: avg,
+      reviewsCount: count,
     },
   }).catch(() => {});
 };
@@ -109,17 +119,38 @@ exports.createForBooking = async (req, res) => {
 
 exports.listForListing = async (req, res) => {
   try {
-    const listingId = req.params.listingId;
+    const listingId = req.params.listingId || req.query.listing;
+    if (!listingId) {
+      return res.status(400).json({ message: "listingId is required." });
+    }
 
-    const reviews = await Review.find({
-      listing: listingId,
-      status: "visible",
-    })
-      .populate("user", "name avatar")
+    const status = req.query.status || "visible";
+    const limit = Math.min(50, Number(req.query.limit) || 20);
+
+    const query = { listing: listingId };
+    if (status) query.status = status;
+
+    const reviews = await Review.find(query)
+      .populate("user", "name fullName firstName avatar")
       .sort({ createdAt: -1 })
+      .limit(limit)
       .lean();
 
-    return res.json({ items: reviews });
+    const listing = await Listing.findById(listingId)
+      .select("ratingAvg ratingCount rating reviewsCount")
+      .lean();
+
+    return res.json({
+      reviews,
+      rating:
+        listing?.ratingAvg ??
+        listing?.rating ??
+        0,
+      count:
+        listing?.ratingCount ??
+        listing?.reviewsCount ??
+        reviews.length,
+    });
   } catch (err) {
     return res.status(500).json({ message: err.message || "Failed to load reviews." });
   }

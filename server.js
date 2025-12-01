@@ -37,6 +37,7 @@ app.use("/api/saves", require("./src/routes/saves.routes"));
 app.use("/api/bookings", require("./src/routes/bookings.routes"));
 app.use("/api/inquiries", require("./src/routes/inquiries.routes"));
 app.use("/api/account", require("./src/routes/account.routes"));
+app.use("/api/reviews", require("./src/routes/reviews.routes"));
 
 app.use("/api/owner", require("./src/owners"));
 app.use("/api/admin", require("./src/admins"));
