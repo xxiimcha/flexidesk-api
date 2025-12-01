@@ -30,7 +30,6 @@ function canReplyInquiry(inquiry, user) { return canReadInquiry(inquiry, user); 
 /* ---------- helpers for populated fields ---------- */
 function listingTitleFrom(doc) {
   const l = doc.listing || doc.listingId;
-  // Prefer server “title/name” if any, otherwise use your real fields: venue → address → city
   return (
     l?.title ||
     l?.name ||
@@ -44,7 +43,6 @@ function listingTitleFrom(doc) {
 function listingPhotoFrom(doc) {
   const l = doc.listing || doc.listingId;
   if (!l) return "";
-  // Try coverPhoto, then photos[0]. If you store only photosMeta (no URL), leave blank.
   const fromArray = Array.isArray(l.photos) && l.photos.length ? l.photos[0] : "";
   const fromMetaUrl =
     Array.isArray(l.photosMeta) && l.photosMeta[0]?.url ? l.photosMeta[0].url : "";
@@ -67,7 +65,7 @@ function mapThreadSummary(doc, meId) {
   const unread = youAreGuest ? (doc.unreadCountGuest || 0) : (doc.unreadCountHost || 0);
   return {
     id: String(doc._id),
-    space: listingTitleFrom(doc),     // ← now uses venue/address if needed
+    space: listingTitleFrom(doc),
     host: hostNameFrom(doc),
     avatar: hostAvatarFrom(doc),
     last: lastMsg?.body || "",
@@ -75,6 +73,7 @@ function mapThreadSummary(doc, meId) {
     unread,
     reservation: doc.reservation || null,
     listingPhoto: listingPhotoFrom(doc),
+    schedule: doc.meta || null,
   };
 }
 
@@ -109,7 +108,6 @@ exports.createInquiry = async (req, res, next) => {
     const guestId = String(uid);
     if (guestId === hostId) return res.status(400).json({ message: "You cannot inquire on your own listing" });
 
-    // sanitize meta
     const cleanMeta = {};
     if (isISODate(meta.startDate)) cleanMeta.startDate = meta.startDate;
     if (isISODate(meta.endDate)) cleanMeta.endDate = meta.endDate;
@@ -159,7 +157,6 @@ exports.listMyInquiries = async (req, res, next) => {
       .slice("messages", -1)
       .populate({
         path: "listingId",
-        // IMPORTANT: include venue/address/city since your schema uses them
         select: "title name venue address city photos coverPhoto photosMeta",
       })
       .populate({ path: "hostId", select: "fullName name avatar" })
